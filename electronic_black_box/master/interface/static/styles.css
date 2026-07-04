@@ -1,0 +1,13 @@
+body{font-family:ui-sans-serif,system-ui;background:#fff;color:#111;margin:0}
+.container{max-width:1100px;margin:24px auto;padding:0 16px}
+.card{border:1px solid #ddd;border-radius:12px;padding:16px;margin:12px 0;box-shadow:0 1px 2px rgba(0,0,0,0.04)}
+button{padding:8px 12px;border:1px solid #ccc;border-radius:10px;background:#fff;cursor:pointer}
+button:hover{background:#f6f6f6}
+input,select{padding:6px 8px;border:1px solid #ccc;border-radius:10px}
+label{font-size:12px;color:#444;margin-right:6px}
+table{width:100%;border-collapse:collapse}
+th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.pill{display:inline-block;border:1px solid #ddd;border-radius:999px;padding:6px 10px;margin-right:6px}
+.muted{color:#666}
+code{background:#f6f6f6;padding:2px 6px;border-radius:6px}

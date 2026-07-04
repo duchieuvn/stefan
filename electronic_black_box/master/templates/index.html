@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Knotenverbindungskarte</title>
+  <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; }
+    h3 { margin: 10px 14px; }
+    #network { width: 100%; height: calc(100vh - 48px); }
+  </style>
+</head>
+<body>
+  <h3>Knotenverbindungskarte</h3>
+  <div id="network"></div>
+  <script src="{{ url_for('static', filename='js/network.js') }}"></script>
+</body>
+</html>

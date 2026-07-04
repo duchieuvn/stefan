@@ -1,0 +1,82 @@
+#T_btn {
+  margin-left: 45%;
+  margin-top: 10%;
+  width: 40px;
+  background-color: greenyellow;
+  border: solid;
+  font-weight: bold;
+  font-size: 30px
+}
+
+button {
+  width: 75px;
+  margin-top: 25px;
+  margin-left: 50px;
+  margin-right: 50px;
+}
+
+html {
+  min-height: 100%;
+}
+
+body {
+  background-image: linear-gradient(180deg, rgba(255,164,32,1) 0%, rgba(255,255,255,1) 35%, rgba(255,255,255,1) 48%, rgba(148,187,233,1) 81%, rgba(101,166,242,1) 100%);
+  filter: progid:DXImageTransform.Microsoft.gradient(startColorstr="#ffa420",endColorstr="#65a6f2",GradientType=1);
+}
+
+.img-banner {
+  display: none;
+  position: absolute;
+  bottom: 0px;
+  margin-left: 7%;
+  background-size: contain;
+  transform: scale(1, 0.8);
+}
+
+@media only screen and (min-width: 1600px) {
+  .img-banner {
+    display: block;
+  }
+}
+
+.box {
+  background-color: white;
+  padding: 10px 10px;
+  border: 1px solid black;
+  margin: 5px;
+  font-weight: bold;
+}
+
+.dynamic_btn {
+  width: 60px;
+  height: 22px;
+  background: rgb(255, 153, 0);
+  box-shadow: inset 0px 0px 6px #fff, inset 0px -1px 6px #fff;
+  border: 1px solid #5ea617;
+  border-radius: 1em;
+  margin-left: 5px;
+  margin-right: 0;
+  margin-top: 0;
+  margin-bottom: 0;
+  font-weight: bold;
+}
+
+.dynamic_btn + .dynamic_btn + .dynamic_btn {
+  background: rgb(64, 255, 0);
+}
+
+.dynamic_btn + .dynamic_btn {
+  background: rgb(247, 0, 255);
+}
+
+/* LED AN (grün) */
+.btn-an {
+  background-color: #4CAF50 !important;
+  color: white;
+}
+
+/* LED AUS (rot) */
+.btn-aus {
+  background-color: #e53935 !important;
+  color: white;
+}
