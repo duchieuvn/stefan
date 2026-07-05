@@ -11,7 +11,7 @@ from plot_visualization import (
     plot_overview_colored,
     write_index_html,
 )
-from plot_workflow import (
+from data_helpers import (
     configure_sqlite,
     parse_nodes,
     detect_schema,
@@ -34,7 +34,7 @@ def normalize_pair(a: int, b: int) -> tuple[int, int]:
     return (min(int(a), int(b)), max(int(a), int(b)))
 
 
-def main() -> None:
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Memory-safe Link-für-Link Auswertung für sensor_data.db")
 
     parser.add_argument("--db", default="sensor_data.db", help="Pfad zur SQLite DB")
@@ -53,25 +53,35 @@ def main() -> None:
     parser.add_argument("--start", default=None, help="Optionaler Startzeitpunkt, z.B. 2026-04-01 00:00:00")
     parser.add_argument("--end", default=None, help="Optionaler Endzeitpunkt, z.B. 2026-05-01 00:00:00")
 
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    db_path = Path(args.db)
+
+def validate_db_path(db: str) -> Path:
+    db_path = Path(db)
     if not db_path.exists():
         raise FileNotFoundError(f"DB nicht gefunden: {db_path}")
 
-    out_root = Path(args.out)
+    return db_path
+
+
+def prepare_output_dirs(out: str) -> tuple[Path, Path, Path, Path]:
+    out_root = Path(out)
     out_directed = out_root / "directed"
     out_pairs = out_root / "pairs"
     out_bme = out_root / "bme"
 
-    ensure_dir(out_root)
-    ensure_dir(out_directed)
-    ensure_dir(out_pairs)
-    ensure_dir(out_bme)
+    for path in (out_root, out_directed, out_pairs, out_bme):
+        ensure_dir(path)
 
-    nodes = parse_nodes(args.nodes)
-    bme_nodes = parse_nodes(args.bme_nodes)
+    return out_root, out_directed, out_pairs, out_bme
 
+
+def load_plot_data(
+    db_path: Path,
+    nodes: list[int],
+    bme_nodes: list[int],
+    args: argparse.Namespace,
+) -> tuple[dict[tuple[int, int], pd.DataFrame], dict[tuple[int, int], pd.DataFrame], pd.DataFrame]:
     with sqlite3.connect(db_path) as con:
         configure_sqlite(con)
         schema = detect_schema(con)
@@ -132,13 +142,23 @@ def main() -> None:
         else:
             df_bme_1h = insert_missing_bme_bins(df_bme_1h, freq="1h", start=args.start, end=args.end)
 
+    return dir_1h, dir_15m, df_bme_1h
+
+
+def plot_directed_links(
+    dir_1h: dict[tuple[int, int], pd.DataFrame],
+    dir_15m: dict[tuple[int, int], pd.DataFrame],
+    out_directed: Path,
+    dpi: int,
+    use_15min: bool,
+) -> None:
     directed_overview_map: dict[tuple[int, int], pd.Series] = {}
 
     for (s, r), d1 in sorted(dir_1h.items()):
         if d1 is None or d1.empty:
             continue
 
-        d15 = dir_15m.get((s, r)) if args.use_15min else None
+        d15 = dir_15m.get((s, r)) if use_15min else None
         out_path = out_directed / f"directed_{s}_to_{r}_rssi.png"
 
         plot_directed_link(
@@ -147,7 +167,7 @@ def main() -> None:
             df_1h=d1,
             df_15m=d15,
             out_path=out_path,
-            dpi=args.dpi,
+            dpi=dpi,
         )
 
         directed_overview_map[(s, r)] = d1["rssi_mean"]
@@ -156,12 +176,18 @@ def main() -> None:
         series_map=directed_overview_map,
         title="Overview: directed links – RSSI mean 1h | gaps preserved",
         out_path=out_directed / "overview_directed_links_1h_colored.png",
-        dpi=args.dpi,
+        dpi=dpi,
         label_fmt=lambda k: f"{k[0]}→{k[1]}",
         ylabel="RSSI [dBm]",
         legend_cols=4,
     )
 
+
+def plot_pairs(
+    dir_1h: dict[tuple[int, int], pd.DataFrame],
+    out_pairs: Path,
+    dpi: int,
+) -> None:
     pair_overview_map: dict[tuple[int, int], pd.Series] = {}
     pairs = sorted({normalize_pair(s, r) for (s, r) in dir_1h.keys()})
 
@@ -183,7 +209,7 @@ def main() -> None:
             ab_1h=ab_s,
             ba_1h=ba_s,
             out_path=out_path,
-            dpi=args.dpi,
+            dpi=dpi,
         )
 
         if pair_mean is not None and not pair_mean.empty:
@@ -193,23 +219,33 @@ def main() -> None:
         series_map=pair_overview_map,
         title="Overview: pairs – pair mean RSSI 1h | gaps preserved",
         out_path=out_pairs / "overview_pairs_1h_colored.png",
-        dpi=args.dpi,
+        dpi=dpi,
         label_fmt=lambda k: f"{k[0]}↔{k[1]}",
         ylabel="RSSI [dBm]",
         legend_cols=4,
     )
 
-    if not df_bme_1h.empty:
-        plot_bme_1h_smooth(
-            df_bme_1h=df_bme_1h,
-            out_dir=out_bme,
-            dpi=args.dpi,
-            smooth_hours=args.bme_smooth_hours,
-            show_raw_1h=not args.bme_hide_raw1h,
-        )
-
+def write_outputs(
+    dir_1h: dict[tuple[int, int], pd.DataFrame],
+    out_root: Path,
+) -> None:
     write_link_summary(dir_1h, out_root / "link_summary_1h.csv")
     write_index_html(out_root)
+
+
+def main() -> None:
+    args = parse_args()
+    db_path = validate_db_path(args.db)
+    out_root, out_directed, out_pairs, out_bme = prepare_output_dirs(args.out)
+
+    nodes = parse_nodes(args.nodes)
+    bme_nodes = parse_nodes(args.bme_nodes)
+    dir_1h, dir_15m, df_bme_1h = load_plot_data(db_path, nodes, bme_nodes, args)
+
+    plot_directed_links(dir_1h, dir_15m, out_directed, args.dpi, args.use_15min)
+    plot_pairs(dir_1h, out_pairs, args.dpi)
+    plot_bme_1h_smooth(df_bme_1h, out_bme, args.dpi, args.bme_smooth_hours, args.bme_hide_raw1h)
+    write_outputs(dir_1h, out_root)
 
     print("\nDONE ✅")
     print("Output:", out_root)
