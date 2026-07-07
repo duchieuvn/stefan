@@ -15,7 +15,8 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-from rti_temporal_core import RTIConfig, RTIModelContext, RTISequenceResult
+from config import RTIConfig
+from rti.rti_temporal_core import RTIModelContext, RTISequenceResult
 
 
 @dataclass

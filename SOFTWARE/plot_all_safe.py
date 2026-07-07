@@ -1,17 +1,17 @@
-import argparse
 import sqlite3
 from pathlib import Path
 
 import pandas as pd
 
-from plot_visualization import (
+from config import DEFAULT_PLOT_CONFIG, PlotAllConfig
+from plot_all.plot_visualization import (
     plot_directed_link,
     plot_pair,
     plot_bme_1h_smooth,
     plot_overview_colored,
     write_index_html,
 )
-from data_helpers import (
+from plot_all.data_helpers import (
     configure_sqlite,
     parse_nodes,
     detect_schema,
@@ -26,6 +26,9 @@ from data_helpers import (
 )
 
 
+CONFIG = DEFAULT_PLOT_CONFIG
+
+
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
@@ -34,29 +37,7 @@ def normalize_pair(a: int, b: int) -> tuple[int, int]:
     return (min(int(a), int(b)), max(int(a), int(b)))
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Memory-safe Link-für-Link Auswertung für sensor_data.db")
-
-    parser.add_argument("--db", default="sensor_data.db", help="Pfad zur SQLite DB")
-    parser.add_argument("--out", default="out_plots", help="Output-Ordner")
-    parser.add_argument("--dpi", type=int, default=140, help="PNG DPI")
-
-    parser.add_argument("--use-15min", action="store_true", help="15min-Mittel zusätzlich in directed plots")
-    parser.add_argument("--nodes", default="1,2,3,4,5,6,7,8", help="Fallback/Standard-Knoten, z.B. 1,2,3,4,5,6,7,8")
-    parser.add_argument("--discover-links", action="store_true", help="Links per SELECT DISTINCT suchen. Sonst werden alle gerichteten Links aus --nodes verwendet.")
-    parser.add_argument("--create-index", action="store_true", help="Optional Index auf sender,receiver,time erzeugen. Kann bei großer DB dauern, beschleunigt danach stark.")
-
-    parser.add_argument("--bme-nodes", default="5,6,7,8", help="receiver_id-Knoten für BME, z.B. 5,6,7,8")
-    parser.add_argument("--bme-smooth-hours", type=int, default=6, help="Glättung über 1h-Werte")
-    parser.add_argument("--bme-hide-raw1h", action="store_true", help="BME 1h-Mittel im Plot ausblenden")
-
-    parser.add_argument("--start", default=None, help="Optionaler Startzeitpunkt, z.B. 2026-04-01 00:00:00")
-    parser.add_argument("--end", default=None, help="Optionaler Endzeitpunkt, z.B. 2026-05-01 00:00:00")
-
-    return parser.parse_args()
-
-
-def validate_db_path(db: str) -> Path:
+def validate_db_path(db: Path) -> Path:
     db_path = Path(db)
     if not db_path.exists():
         raise FileNotFoundError(f"DB nicht gefunden: {db_path}")
@@ -64,7 +45,7 @@ def validate_db_path(db: str) -> Path:
     return db_path
 
 
-def prepare_output_dirs(out: str) -> tuple[Path, Path, Path, Path]:
+def prepare_output_dirs(out: Path) -> tuple[Path, Path, Path, Path]:
     out_root = Path(out)
     out_directed = out_root / "directed"
     out_pairs = out_root / "pairs"
@@ -80,19 +61,19 @@ def load_plot_data(
     db_path: Path,
     nodes: list[int],
     bme_nodes: list[int],
-    args: argparse.Namespace,
+    config: PlotAllConfig,
 ) -> tuple[dict[tuple[int, int], pd.DataFrame], dict[tuple[int, int], pd.DataFrame], pd.DataFrame]:
     with sqlite3.connect(db_path) as con:
         configure_sqlite(con)
         schema = detect_schema(con)
         print("Detected schema:", schema)
 
-        if args.create_index:
+        if config.create_index:
             create_helpful_index(con, schema)
 
-        if args.discover_links:
+        if config.discover_links:
             print("Discovering directed links ...")
-            links = discover_directed_links(con, schema, start=args.start, end=args.end, fallback_nodes=nodes)
+            links = discover_directed_links(con, schema, start=config.start, end=config.end, fallback_nodes=nodes)
         else:
             links = make_directed_links_from_nodes(nodes)
 
@@ -104,27 +85,27 @@ def load_plot_data(
             schema=schema,
             links=links,
             rule="1h",
-            start=args.start,
-            end=args.end,
+            start=config.start,
+            end=config.end,
         )
 
         if not dir_1h:
             raise RuntimeError("Keine RSSI-Daten gefunden.")
 
-        dir_1h = insert_missing_time_bins(dir_1h, freq="1h", start=args.start, end=args.end)
+        dir_1h = insert_missing_time_bins(dir_1h, freq="1h", start=config.start, end=config.end)
         print(f"Directed links with data: {len(dir_1h)}")
 
-        if args.use_15min:
+        if config.use_15min:
             print("Loading directed links LINK-BY-LINK as 15min SQL aggregation ...")
             dir_15m = load_all_directed_links_linkwise(
                 con=con,
                 schema=schema,
                 links=links,
                 rule="15min",
-                start=args.start,
-                end=args.end,
+                start=config.start,
+                end=config.end,
             )
-            dir_15m = insert_missing_time_bins(dir_15m, freq="15min", start=args.start, end=args.end)
+            dir_15m = insert_missing_time_bins(dir_15m, freq="15min", start=config.start, end=config.end)
         else:
             dir_15m = {}
 
@@ -133,14 +114,14 @@ def load_plot_data(
             con=con,
             schema=schema,
             nodes=bme_nodes,
-            start=args.start,
-            end=args.end,
+            start=config.start,
+            end=config.end,
         )
 
         if df_bme_1h.empty:
             print("WARN: Keine BME Daten gefunden.")
         else:
-            df_bme_1h = insert_missing_bme_bins(df_bme_1h, freq="1h", start=args.start, end=args.end)
+            df_bme_1h = insert_missing_bme_bins(df_bme_1h, freq="1h", start=config.start, end=config.end)
 
     return dir_1h, dir_15m, df_bme_1h
 
@@ -225,6 +206,7 @@ def plot_pairs(
         legend_cols=4,
     )
 
+
 def write_outputs(
     dir_1h: dict[tuple[int, int], pd.DataFrame],
     out_root: Path,
@@ -233,18 +215,17 @@ def write_outputs(
     write_index_html(out_root)
 
 
-def main() -> None:
-    args = parse_args()
-    db_path = validate_db_path(args.db)
-    out_root, out_directed, out_pairs, out_bme = prepare_output_dirs(args.out)
+def main(config: PlotAllConfig = CONFIG) -> None:
+    db_path = validate_db_path(config.db_path)
+    out_root, out_directed, out_pairs, out_bme = prepare_output_dirs(config.out_dir)
 
-    nodes = parse_nodes(args.nodes)
-    bme_nodes = parse_nodes(args.bme_nodes)
-    dir_1h, dir_15m, df_bme_1h = load_plot_data(db_path, nodes, bme_nodes, args)
+    nodes = parse_nodes(config.nodes)
+    bme_nodes = parse_nodes(config.bme_nodes)
+    dir_1h, dir_15m, df_bme_1h = load_plot_data(db_path, nodes, bme_nodes, config)
 
-    plot_directed_links(dir_1h, dir_15m, out_directed, args.dpi, args.use_15min)
-    plot_pairs(dir_1h, out_pairs, args.dpi)
-    plot_bme_1h_smooth(df_bme_1h, out_bme, args.dpi, args.bme_smooth_hours, args.bme_hide_raw1h)
+    plot_directed_links(dir_1h, dir_15m, out_directed, config.dpi, config.use_15min)
+    plot_pairs(dir_1h, out_pairs, config.dpi)
+    plot_bme_1h_smooth(df_bme_1h, out_bme, config.dpi, config.bme_smooth_hours, config.bme_hide_raw1h)
     write_outputs(dir_1h, out_root)
 
     print("\nDONE ✅")

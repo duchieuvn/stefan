@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 
-SRC = Path("sensor_data.db")
+SRC = Path("../sensor_data.db")
 OUT = Path("sensor_data_every_5th_round.db")
 
 # Nur Runden behalten, deren round_id durch 5 teilbar ist:

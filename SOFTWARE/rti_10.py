@@ -24,9 +24,8 @@ matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-from rti_temporal_core import (
-    DEFAULT_CONFIG,
-    RTIConfig,
+from config import DEFAULT_CONFIG, RTIConfig
+from rti.rti_temporal_core import (
     RTIModelContext,
     RTISequenceResult,
     build_model_context,
@@ -36,7 +35,7 @@ from rti_temporal_core import (
     get_connection,
     interval_label,
 )
-from rti_temporal_visualization import (
+from rti.rti_temporal_visualization import (
     TemporalFigure,
     clear_colorbars,
     create_temporal_figure,
