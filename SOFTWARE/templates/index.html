@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>Dynamische RTI</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; }
+  .row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .row input[type=range] { flex: 1; }
+  .label { font-weight: bold; }
+  #info { color: #333; margin: 10px 0; font-size: 0.9em; }
+  #plot { max-width: 100%; border: 1px solid #ccc; }
+  button { padding: 6px 14px; }
+</style>
+</head>
+<body>
+
+<div class="row">
+  <span>Referenz: <span id="ref_label" class="label"></span></span>
+  <span style="margin-left: 30px;">Gezeigte Karte: <span id="cur_label" class="label"></span></span>
+  <button id="recalc" style="margin-left: auto;">Neu berechnen</button>
+</div>
+
+<div class="row">
+  <span>Referenztag</span>
+  <span>{{ available_dates[0] }}</span>
+  <input type="range" id="ref_slider" min="0" max="{{ max_idx }}" value="{{ default_ref_idx }}">
+  <span>{{ available_dates[-1] }}</span>
+</div>
+
+<div class="row">
+  <span>Karte in der Zeitfolge</span>
+  <span>{{ available_dates[0] }}</span>
+  <input type="range" id="cur_slider" min="0" max="{{ max_idx }}" value="{{ default_cur_idx }}">
+  <span>{{ available_dates[-1] }}</span>
+</div>
+
+<div id="info">Lade ...</div>
+
+<img id="plot" alt="RTI Plot">
+
+<script>
+const refSlider = document.getElementById("ref_slider");
+const curSlider = document.getElementById("cur_slider");
+const recalcBtn = document.getElementById("recalc");
+const refLabel = document.getElementById("ref_label");
+const curLabel = document.getElementById("cur_label");
+const info = document.getElementById("info");
+const plot = document.getElementById("plot");
+
+let debounceTimer = null;
+
+async function refresh(force) {
+  const params = new URLSearchParams({
+    ref_idx: refSlider.value,
+    cur_idx: curSlider.value,
+    force: force ? "1" : "0",
+  });
+  info.textContent = "Rechne ...";
+  const res = await fetch("/api/update?" + params.toString());
+  const data = await res.json();
+  refLabel.textContent = data.ref_label;
+  curLabel.textContent = data.cur_label;
+  info.textContent = data.info;
+  plot.src = "data:image/png;base64," + data.image;
+  refSlider.value = data.ref_idx;
+  curSlider.value = data.cur_idx;
+}
+
+function debouncedRefresh(force, delay) {
+  if (debounceTimer) clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => refresh(force), delay);
+}
+
+refSlider.addEventListener("change", () => refresh(false));
+curSlider.addEventListener("input", () => debouncedRefresh(false, 150));
+recalcBtn.addEventListener("click", () => refresh(true));
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+    const delta = event.key === "ArrowLeft" ? -1 : 1;
+    const newVal = Math.max(0, Math.min(parseInt(curSlider.max), parseInt(curSlider.value) + delta));
+    if (newVal !== parseInt(curSlider.value)) {
+      curSlider.value = newVal;
+      debouncedRefresh(false, 60);
+    }
+  }
+});
+
+refresh(false);
+</script>
+
+</body>
+</html>
