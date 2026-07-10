@@ -4,67 +4,292 @@
 <meta charset="utf-8">
 <title>Dynamische RTI</title>
 <style>
-  body { font-family: sans-serif; margin: 20px; }
-  .row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
-  .row input[type=range] { flex: 1; }
-  .label { font-weight: bold; }
-  #info { color: #333; margin: 10px 0; font-size: 0.9em; }
-  #plot { max-width: 100%; border: 1px solid #ccc; }
-  button { padding: 6px 14px; }
+  :root {
+    --bg: #f4f5f7;
+    --card-bg: #ffffff;
+    --border: #e0e2e7;
+    --text: #1f2328;
+    --text-muted: #6b7280;
+    --accent: #1565c0;
+    --radius: 10px;
+    --gap: 16px;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    margin: 0;
+    padding: 24px 16px;
+    background: var(--bg);
+    color: var(--text);
+  }
+
+  .page {
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+
+  h1 {
+    font-size: 1.4rem;
+    margin: 0 0 16px;
+  }
+
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+    padding: 20px 24px;
+  }
+
+  .card + .card {
+    margin-top: var(--gap);
+  }
+
+  /* Toolbar */
+  .toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--gap);
+    flex-wrap: wrap;
+  }
+
+  .segmented {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+
+  .segmented label {
+    padding: 6px 16px;
+    font-size: 0.9rem;
+    cursor: pointer;
+    color: var(--text-muted);
+    user-select: none;
+  }
+
+  .segmented label:not(:last-child) {
+    border-right: 1px solid var(--border);
+  }
+
+  .segmented input {
+    display: none;
+  }
+
+  .segmented input:checked + span {
+    font-weight: 600;
+  }
+
+  .segmented label:has(input:checked) {
+    background: var(--accent);
+    color: #fff;
+  }
+
+  button#recalc {
+    padding: 8px 18px;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 0.9rem;
+    cursor: pointer;
+  }
+
+  button#recalc:hover {
+    filter: brightness(1.08);
+  }
+
+  /* Status */
+  .status {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--gap);
+  }
+
+  .status-item .status-title {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+  }
+
+  .status-item .status-value {
+    font-size: 1.05rem;
+    font-weight: 600;
+  }
+
+  /* Sliders */
+  .slider-block {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .slider-block + .slider-block {
+    margin-top: 20px;
+  }
+
+  .slider-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .slider-block input[type=range] {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+
+  .slider-range {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+  }
+
+  /* Info panel */
+  #info {
+    margin-top: var(--gap);
+    padding: 10px 14px;
+    background: #f0f4fa;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+
+  /* Plot */
+  .plot-wrap {
+    display: flex;
+    justify-content: center;
+    margin-top: var(--gap);
+  }
+
+  #plot {
+    max-width: 100%;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
 </style>
 </head>
 <body>
 
-<div class="row">
-  <span>Referenz: <span id="ref_label" class="label"></span></span>
-  <span style="margin-left: 30px;">Gezeigte Karte: <span id="cur_label" class="label"></span></span>
-  <button id="recalc" style="margin-left: auto;">Neu berechnen</button>
+<div class="page">
+  <h1>Dynamische RTI</h1>
+
+  <div class="card">
+    <div class="toolbar">
+      <div class="segmented">
+        <label><input type="radio" name="window" value="3m" {% if default_window == "3m" %}checked{% endif %}><span>3 Monate</span></label>
+        <label><input type="radio" name="window" value="6m" {% if default_window == "6m" %}checked{% endif %}><span>6 Monate</span></label>
+      </div>
+      <button id="recalc">Neu berechnen</button>
+    </div>
+
+    <div class="status" style="margin-top: var(--gap);">
+      <div class="status-item">
+        <div class="status-title">Referenz</div>
+        <div class="status-value" id="ref_label"></div>
+      </div>
+      <div class="status-item">
+        <div class="status-title">Gezeigte Karte</div>
+        <div class="status-value" id="cur_label"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="slider-block">
+      <div class="slider-title">Referenztag</div>
+      <input type="range" id="ref_slider" min="0" max="0" value="0">
+      <div class="slider-range">
+        <span id="ref_date_start"></span>
+        <span id="ref_date_end"></span>
+      </div>
+    </div>
+
+    <div class="slider-block">
+      <div class="slider-title">Karte in der Zeitfolge</div>
+      <input type="range" id="cur_slider" min="0" max="0" value="0">
+      <div class="slider-range">
+        <span id="cur_date_start"></span>
+        <span id="cur_date_end"></span>
+      </div>
+    </div>
+
+    <div id="info">Lade ...</div>
+  </div>
+
+  <div class="plot-wrap">
+    <img id="plot" alt="RTI Plot">
+  </div>
 </div>
-
-<div class="row">
-  <span>Referenztag</span>
-  <span>{{ available_dates[0] }}</span>
-  <input type="range" id="ref_slider" min="0" max="{{ max_idx }}" value="{{ default_ref_idx }}">
-  <span>{{ available_dates[-1] }}</span>
-</div>
-
-<div class="row">
-  <span>Karte in der Zeitfolge</span>
-  <span>{{ available_dates[0] }}</span>
-  <input type="range" id="cur_slider" min="0" max="{{ max_idx }}" value="{{ default_cur_idx }}">
-  <span>{{ available_dates[-1] }}</span>
-</div>
-
-<div id="info">Lade ...</div>
-
-<img id="plot" alt="RTI Plot">
 
 <script>
 const refSlider = document.getElementById("ref_slider");
 const curSlider = document.getElementById("cur_slider");
 const recalcBtn = document.getElementById("recalc");
+const windowRadios = document.querySelectorAll('input[name="window"]');
 const refLabel = document.getElementById("ref_label");
 const curLabel = document.getElementById("cur_label");
+const refDateStart = document.getElementById("ref_date_start");
+const refDateEnd = document.getElementById("ref_date_end");
+const curDateStart = document.getElementById("cur_date_start");
+const curDateEnd = document.getElementById("cur_date_end");
 const info = document.getElementById("info");
 const plot = document.getElementById("plot");
 
 let debounceTimer = null;
+let currentRefDate = null;
+let currentCurDate = null;
+let initialLoad = true;
 
-async function refresh(force) {
-  const params = new URLSearchParams({
-    ref_idx: refSlider.value,
-    cur_idx: curSlider.value,
-    force: force ? "1" : "0",
-  });
+function getWindow() {
+  return document.querySelector('input[name="window"]:checked').value;
+}
+
+async function refresh(force, { windowChanged = false } = {}) {
+  const params = new URLSearchParams({ window: getWindow(), force: force ? "1" : "0" });
+
+  if (windowChanged && currentRefDate) {
+    params.set("ref_date", currentRefDate);
+  } else if (!initialLoad) {
+    params.set("ref_idx", refSlider.value);
+  }
+
+  if (windowChanged && currentCurDate) {
+    params.set("cur_date", currentCurDate);
+  } else if (!initialLoad) {
+    params.set("cur_idx", curSlider.value);
+  }
+
   info.textContent = "Rechne ...";
   const res = await fetch("/api/update?" + params.toString());
   const data = await res.json();
+
+  refSlider.max = data.max_idx;
+  refSlider.value = data.ref_idx;
+  curSlider.max = data.max_idx;
+  curSlider.value = data.cur_idx;
+
+  refDateStart.textContent = data.first_date;
+  refDateEnd.textContent = data.last_date;
+  curDateStart.textContent = data.first_date;
+  curDateEnd.textContent = data.last_date;
+
   refLabel.textContent = data.ref_label;
   curLabel.textContent = data.cur_label;
   info.textContent = data.info;
   plot.src = "data:image/png;base64," + data.image;
-  refSlider.value = data.ref_idx;
-  curSlider.value = data.cur_idx;
+
+  currentRefDate = data.ref_date;
+  currentCurDate = data.cur_date;
+  initialLoad = false;
 }
 
 function debouncedRefresh(force, delay) {
@@ -75,6 +300,7 @@ function debouncedRefresh(force, delay) {
 refSlider.addEventListener("change", () => refresh(false));
 curSlider.addEventListener("input", () => debouncedRefresh(false, 150));
 recalcBtn.addEventListener("click", () => refresh(true));
+windowRadios.forEach((radio) => radio.addEventListener("change", () => refresh(false, { windowChanged: true })));
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "ArrowLeft" || event.key === "ArrowRight") {

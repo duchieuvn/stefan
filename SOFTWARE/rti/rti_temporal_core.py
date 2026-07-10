@@ -328,6 +328,24 @@ def get_all_dates(con: sqlite3.Connection) -> list[str]:
     return [str(r[0]) for r in rows if r[0] is not None]
 
 
+def get_latest_pc_ts(con: sqlite3.Connection) -> str | None:
+    row = con.execute("SELECT MAX(pc_ts) FROM measurement WHERE pc_ts IS NOT NULL").fetchone()
+    return str(row[0]) if row and row[0] is not None else None
+
+
+def get_dates_since(con: sqlite3.Connection, since_ts: str) -> list[str]:
+    rows = con.execute(
+        """
+        SELECT DISTINCT substr(pc_ts, 1, 10) AS day
+        FROM measurement
+        WHERE pc_ts IS NOT NULL AND pc_ts >= ?
+        ORDER BY day ASC
+        """,
+        (since_ts,),
+    ).fetchall()
+    return [str(r[0]) for r in rows if r[0] is not None]
+
+
 def get_dates_with_full_window_coverage(
     con: sqlite3.Connection,
     start_hhmm: str,
