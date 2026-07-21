@@ -1,5 +1,8 @@
 *._*
 *.DS_Store
-*.db
+*.db*
+*.env
 *.pyc
 out_plots/
+.agents/
+.codex/
