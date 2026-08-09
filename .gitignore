@@ -6,3 +6,5 @@
 out_plots/
 .agents/
 .codex/
+sequence_cache/
+prototype_02/

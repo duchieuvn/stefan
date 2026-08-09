@@ -17,15 +17,16 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 import math
-import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+import logging
 
 import numpy as np
 
-from config import DEFAULT_CONFIG, RTIConfig
+from config import DEFAULT_CONFIG, RTIConfig    
+from rti.database import DatabaseProvider
 
 
 @dataclass(frozen=True)
@@ -302,21 +303,7 @@ def build_grid_laplacian(ij_to_k: dict[tuple[int, int], int]) -> np.ndarray:
     return Q
 
 
-def get_connection(config: RTIConfig = DEFAULT_CONFIG) -> sqlite3.Connection:
-    con = sqlite3.connect(config.db_path)
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA temp_store=MEMORY")
-    return con
-
-
-def ensure_indexes(con: sqlite3.Connection) -> None:
-    con.execute("CREATE INDEX IF NOT EXISTS idx_measurement_pc_ts ON measurement(pc_ts)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_measurement_link_time ON measurement(sender_id, receiver_id, pc_ts)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_measurement_ok_time ON measurement(ok_match, pc_ts)")
-    con.commit()
-
-
-def get_all_dates(con: sqlite3.Connection) -> list[str]:
+def get_all_dates(con: Any) -> list[str]:
     rows = con.execute(
         """
         SELECT DISTINCT substr(pc_ts, 1, 10) AS day
@@ -329,7 +316,7 @@ def get_all_dates(con: sqlite3.Connection) -> list[str]:
 
 
 def get_dates_with_full_window_coverage(
-    con: sqlite3.Connection,
+    con: Any,
     start_hhmm: str,
     end_hhmm: str,
     edge_tolerance_min: int,
@@ -342,8 +329,8 @@ def get_dates_with_full_window_coverage(
             MAX(pc_ts) AS last_ts
         FROM measurement
         WHERE pc_ts IS NOT NULL
-          AND substr(pc_ts, 12, 5) >= ?
-          AND substr(pc_ts, 12, 5) <= ?
+          AND substr(pc_ts, 12, 5) >= %s
+          AND substr(pc_ts, 12, 5) <= %s
         GROUP BY substr(pc_ts, 1, 10)
         ORDER BY day ASC
         """,
@@ -370,7 +357,7 @@ def get_dates_with_full_window_coverage(
     return usable
 
 
-def get_available_dates(con: sqlite3.Connection, config: RTIConfig = DEFAULT_CONFIG) -> list[str]:
+def get_available_dates(con: Any, config: RTIConfig = DEFAULT_CONFIG) -> list[str]:
     if not config.require_full_window_coverage:
         return get_all_dates(con)
 
@@ -433,7 +420,7 @@ def _empty_day_tmp() -> dict[str, Any]:
 
 
 def load_stats_for_interval(
-    con: sqlite3.Connection,
+    con: Any,
     start_ts: str,
     end_ts: str,
     config: RTIConfig = DEFAULT_CONFIG,
@@ -443,8 +430,8 @@ def load_stats_for_interval(
         SELECT sender_id, receiver_id, ok_match, rssi, round_id, pc_ts
         FROM measurement
         WHERE pc_ts IS NOT NULL
-          AND pc_ts >= ?
-          AND pc_ts <= ?
+          AND pc_ts >= %s
+          AND pc_ts <= %s
           AND sender_id IS NOT NULL
           AND receiver_id IS NOT NULL
           AND sender_id != receiver_id
@@ -476,7 +463,7 @@ def load_stats_for_interval(
 
 
 def load_stats_for_many_days(
-    con: sqlite3.Connection,
+    con: Any,
     dates: list[str],
     start_hhmm: str,
     end_hhmm: str,
@@ -493,10 +480,10 @@ def load_stats_for_many_days(
         SELECT sender_id, receiver_id, ok_match, rssi, round_id, pc_ts
         FROM measurement
         WHERE pc_ts IS NOT NULL
-          AND pc_ts >= ?
-          AND pc_ts <= ?
-          AND substr(pc_ts, 12, 5) >= ?
-          AND substr(pc_ts, 12, 5) <= ?
+          AND pc_ts >= %s
+          AND pc_ts <= %s
+          AND substr(pc_ts, 12, 5) >= %s
+          AND substr(pc_ts, 12, 5) <= %s
           AND sender_id IS NOT NULL
           AND receiver_id IS NOT NULL
           AND sender_id != receiver_id
@@ -668,6 +655,7 @@ def solve_temporal_smooth_rti_block_tridiagonal(
     dt_days_list: list[float] = []
     betas: list[float] = []
 
+    logging.info("Computing temporal smoothing coefficients for %d time points.", T)
     for t in range(1, T):
         dt_days = elapsed_days(times[t - 1], times[t])
         beta = alpha_time / dt_days
@@ -797,7 +785,8 @@ def load_interval_cached(
     start_hhmm: str,
     end_hhmm: str,
     interval_cache: dict[tuple[str, str], tuple[dict, dict]],
-    config: RTIConfig = DEFAULT_CONFIG,
+    database: DatabaseProvider,
+    config: RTIConfig,
 ) -> tuple[dict, dict]:
     start_ts, end_ts = build_interval_timestamps(date_txt, start_hhmm, end_hhmm)
     key = (start_ts, end_ts)
@@ -805,7 +794,7 @@ def load_interval_cached(
     if key in interval_cache:
         return interval_cache[key]
 
-    con = get_connection(config)
+    con = database.connect()
     try:
         stats, meta = load_stats_for_interval(con, start_ts, end_ts, config)
     finally:
@@ -820,7 +809,8 @@ def ensure_many_intervals_cached(
     start_hhmm: str,
     end_hhmm: str,
     interval_cache: dict[tuple[str, str], tuple[dict, dict]],
-    config: RTIConfig = DEFAULT_CONFIG,
+    database: DatabaseProvider,
+    config: RTIConfig,
 ) -> None:
     missing_dates: list[str] = []
     for day in dates:
@@ -831,7 +821,7 @@ def ensure_many_intervals_cached(
     if not missing_dates:
         return
 
-    con = get_connection(config)
+    con = database.connect()
     try:
         loaded = load_stats_for_many_days(con, missing_dates, start_hhmm, end_hhmm, config)
     finally:
@@ -847,22 +837,28 @@ def compute_temporal_sequence(
     ref_date: str,
     sequence_dates: list[str],
     interval_cache: dict[tuple[str, str], tuple[dict, dict]],
-    config: RTIConfig = DEFAULT_CONFIG,
+    database: DatabaseProvider,
+    config: RTIConfig,
 ) -> RTISequenceResult:
     ref_stats, ref_meta = load_interval_cached(
         ref_date,
         config.ref_start_hhmm,
         config.ref_end_hhmm,
         interval_cache,
+        database,
         config,
     )
+    logging.info("Loaded reference interval for %s: %d pairs, %d rounds, %d measurements", ref_date, len(ref_stats), len(ref_meta["round_ids"]), ref_meta["n_measurements"])
+
     ensure_many_intervals_cached(
         sequence_dates,
         config.cur_start_hhmm,
         config.cur_end_hhmm,
         interval_cache,
+        database,
         config,
     )
+    logging.info("Cached %d intervals for sequence dates: %s", len(sequence_dates), sequence_dates)
 
     W_list: list[np.ndarray] = []
     y_list: list[np.ndarray] = []
@@ -871,12 +867,14 @@ def compute_temporal_sequence(
     details_list: list[list[dict[str, Any]]] = []
     valid_counts: list[int] = []
 
+    logging.info("Processing temporal sequence for dates: %s", sequence_dates)
     for date_txt in sequence_dates:
         cur_stats, cur_meta = load_interval_cached(
             date_txt,
             config.cur_start_hhmm,
             config.cur_end_hhmm,
             interval_cache,
+            database,
             config,
         )
         y_t, valid_mask_t, details_t = build_y_vector_for_pairs(ref_stats, cur_stats, context.pairs, config)
@@ -888,7 +886,9 @@ def compute_temporal_sequence(
         cur_meta_list.append(cur_meta)
         details_list.append(details_t)
         valid_counts.append(int(np.sum(valid_mask_t)))
+    logging.info("Done processing temporal sequence. Valid counts per date: %s", valid_counts)
 
+    logging.info("Solving temporal RTI sequence with %d time points, reference index %d", len(sequence_dates), sequence_dates.index(ref_date))
     reference_index = sequence_dates.index(ref_date)
     x_all, dt_days_list = solve_temporal_smooth_rti_block_tridiagonal(
         W_list=W_list,
