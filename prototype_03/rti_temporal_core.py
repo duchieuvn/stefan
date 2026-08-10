@@ -912,16 +912,64 @@ def compute_temporal_sequence(
         valid_counts.append(int(np.sum(valid_mask_t)))
 
     reference_index = sequence_dates.index(ref_date)
-    x_all, dt_days_list = solve_temporal_smooth_rti_block_tridiagonal(
-        W_list=W_list,
-        y_list=y_list,
-        Q=context.Q,
-        times=times,
-        reference_index=reference_index,
-        alpha_ridge=config.alpha_ridge,
-        alpha_smooth=config.alpha_smooth,
-        alpha_time=config.alpha_time,
-    )
+    T = len(sequence_dates)
+    n_cells = context.Q.shape[0]
+    x_all = np.zeros((T, n_cells), dtype=float)
+
+    # Pre-calculate all time deltas for the final result object
+    dt_days_list: list[float] = []
+    for t in range(1, T):
+        dt_days_list.append(elapsed_days(times[t - 1], times[t]))
+
+    window_size = config.temporal_smoothing_window_days
+    logging.info("Solving temporal sequence in chunks of %d days.", window_size)
+
+    for i in range(0, T, window_size):
+        chunk_start = i
+        chunk_end = min(i + window_size, T)
+        logging.info("Processing chunk: days %d to %d.", chunk_start, chunk_end - 1)
+
+        chunk_indices = range(chunk_start, chunk_end)
+        chunk_W = [W_list[j] for j in chunk_indices]
+        chunk_y = [y_list[j] for j in chunk_indices]
+        chunk_times = [times[j] for j in chunk_indices]
+
+        if chunk_start <= reference_index < chunk_end:
+            # This chunk contains the reference, solve it with the anchor.
+            chunk_ref_idx = reference_index - chunk_start
+            x_chunk, _ = solve_temporal_smooth_rti_block_tridiagonal(
+                W_list=chunk_W,
+                y_list=chunk_y,
+                Q=context.Q,
+                times=chunk_times,
+                reference_index=chunk_ref_idx,
+                alpha_ridge=config.alpha_ridge,
+                alpha_smooth=config.alpha_smooth,
+                alpha_time=config.alpha_time,
+            )
+        else:
+            # This chunk does not contain the reference. Solve it as a single segment.
+            # This requires replicating the setup logic from the main solver.
+            I = np.eye(n_cells, dtype=float)
+            diag_blocks: list[np.ndarray] = []
+            rhs_blocks: list[np.ndarray] = []
+            for W_t, y_t in zip(chunk_W, chunk_y):
+                A_data = W_t.T @ W_t if W_t.shape[0] > 0 else np.zeros((n_cells, n_cells), dtype=float)
+                b_data = W_t.T @ y_t if W_t.shape[0] > 0 else np.zeros(n_cells, dtype=float)
+                diag_blocks.append(A_data + config.alpha_ridge * I + config.alpha_smooth * context.Q)
+                rhs_blocks.append(b_data)
+
+            betas: list[float] = []
+            for t in range(1, len(chunk_times)):
+                dt_days = elapsed_days(chunk_times[t - 1], chunk_times[t])
+                beta = config.alpha_time / dt_days
+                betas.append(beta)
+                diag_blocks[t - 1] += beta * I
+                diag_blocks[t] += beta * I
+
+            x_chunk = solve_block_tridiagonal_segment(diag_blocks, rhs_blocks, betas)
+
+        x_all[chunk_start:chunk_end, :] = x_chunk
 
     x_disp_all = np.vstack([prepare_display_values(row, config) for row in x_all])
     vmin, vmax = global_symmetric_limits(x_all)
