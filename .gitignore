@@ -1,5 +1,11 @@
 *._*
 *.DS_Store
-*.db
+*.db*
+*.env
 *.pyc
 out_plots/
+.agents/
+.codex/
+sequence_cache/
+prototype_02/
+*.joblib
