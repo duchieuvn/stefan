@@ -626,6 +626,57 @@ def solve_temporal_smooth_rti_block_tridiagonal(
     alpha_smooth: float,
     alpha_time: float,
 ) -> tuple[np.ndarray, list[float]]:
+    """
+    Solve temporally regularized Real-Time Inverse (RTI) problems with hard zero-anchored reference.
+
+    Formulates and solves the inverse problem across a time sequence where the reference 
+    state is constrained to zero, enforcing spatial smoothness, ridge regularization, and 
+    temporal continuity across non-reference time steps.
+
+    Objective Function
+    ------------------
+    Minimizes the following objective for all non-reference time steps t:
+
+        sum_t || W_t * x_t - y_t ||^2
+      + alpha_ridge * sum_t || x_t ||^2
+      + alpha_smooth * sum_t (x_t^T * Q * x_t)
+      + alpha_time   * sum_t (1 / dt_t) * || x_t - x_{t-1} ||^2
+
+    Parameters
+    ----------
+    y : list or ndarray
+        Measured data/observation vectors y_t for each time step t.
+    W : list or ndarray
+        Weighting/system matrices W_t for each time step t.
+    Q : ndarray
+        Spatial regularization matrix (e.g., Laplacian) for spatial smoothness.
+    ref_index : int
+        Index corresponding to the reference time step t_ref.
+    dt : list or ndarray
+        Time intervals dt_t between consecutive time steps.
+    alpha_ridge : float
+        Regularization parameter for L2 ridge norm penalization.
+    alpha_smooth : float
+        Regularization parameter for spatial smoothing.
+    alpha_time : float
+        Regularization parameter for temporal continuity penalization.
+
+    Returns
+    -------
+    x : ndarray
+        Reconstructed time-series states x_t, with x[ref_index] strictly equal to zero.
+
+    Notes
+    -----
+    Hard Zero Reference Anchor:
+        The reference state is strictly constrained rather than penalised softly:
+        
+            x_ref = 0
+
+        Because x_t represents change relative to the reference state, the change at the 
+        reference point itself is zero by definition. The temporal sequence on both sides 
+        (left and right) of the reference index is solved subject to this hard zero boundary condition.
+    """
     if not W_list or not y_list:
         raise ValueError("Keine Zeitpunkte für die zeitliche RTI vorhanden.")
     if len(W_list) != len(y_list) or len(W_list) != len(times):

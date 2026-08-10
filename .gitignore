@@ -8,3 +8,4 @@ out_plots/
 .codex/
 sequence_cache/
 prototype_02/
+*.joblib
