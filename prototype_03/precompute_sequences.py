@@ -71,7 +71,7 @@ def precompute_all(config: RTIConfig, database: DatabaseProvider, force: bool = 
         return
 
     # Hardcode filtering to the last 6 months of data.
-    months_to_keep = 6
+    months_to_keep = 3
     logging.info("Filtering dates to the last %d months.", months_to_keep)
     latest_date = date.fromisoformat(max(available_dates))
     cutoff_date = _get_cutoff_date(latest_date, months_to_keep)
