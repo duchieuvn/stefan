@@ -31,12 +31,24 @@ MEASUREMENT_COLUMNS = (
 )
 
 
-def load_postgres_dsn() -> str:
-    """Load the PostgreSQL connection string from SOFTWARE/.env."""
+def load_postgres_dsn(connection_type: str = "local") -> str:
+    """
+    Load the PostgreSQL connection string based on the connection type.
 
-    dsn = os.getenv("POSTGRES_DSN")
+    Argument:
+        connection_type: "tailscale" or "local"
+    Returns:
+        The PostgreSQL connection string.
+    """
+
+    if connection_type == "tailscale":
+        dsn = os.getenv("TAILSCALE_POSTGRES_DSN", "postgresql://holzofen:biofilter@100.100.51.120/sensor_data")
+    elif connection_type == "local":
+        dsn = os.getenv("LOCAL_POSTGRES_DSN", "postgresql://holzofen:biofilter@localhost/sensor_data")
+    else:
+        raise ValueError("Invalid connection type. Use 'tailscale' or 'local'.")
     if not dsn:
-        raise RuntimeError(f"POSTGRES_DSN is missing in {ENV_PATH}")
+        raise RuntimeError(f"{connection_type.upper()}_POSTGRES_DSN is missing in {ENV_PATH}")
     return dsn
 
 
@@ -200,7 +212,7 @@ def sync_table(
 
 
 def main() -> None:
-    dsn = load_postgres_dsn()
+    dsn = load_postgres_dsn("tailscale")
 
     with closing(connect_sqlite()) as sqlite_connection:
         with psycopg.connect(dsn) as postgres:
