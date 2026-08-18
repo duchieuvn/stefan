@@ -7,11 +7,7 @@ import time
 from typing import Callable
 
 import psycopg
-
-try:
-    from . import sync_postgres
-except ImportError:  # Allow this file to be run directly from SOFTWARE/.
-    import sync_postgres
+import sync_postgres
 
 
 RUN_INTERVAL_SECONDS = 2 * 60 * 60
