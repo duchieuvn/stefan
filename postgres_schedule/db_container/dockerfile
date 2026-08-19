@@ -1,0 +1,16 @@
+FROM postgres:16-alpine
+
+# Set default environment variables for database initialization
+ENV POSTGRES_DB=sensor_data
+ENV POSTGRES_USER=postgres
+ENV POSTGRES_PASSWORD=root_postgres_password
+
+# Copy the dump file and restore script into the auto-init directory
+COPY sensor_data.dump /docker-entrypoint-initdb.d/sensor_data.dump
+COPY restore.sh /docker-entrypoint-initdb.d/01-restore.sh
+
+# Ensure the entrypoint script is executable
+RUN chmod +x /docker-entrypoint-initdb.d/01-restore.sh
+
+# Expose standard PostgreSQL port
+EXPOSE 5432
