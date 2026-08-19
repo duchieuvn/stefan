@@ -10,7 +10,6 @@ import sys
 import time
 from typing import Callable
 
-import psycopg
 import sync_postgres
 from dotenv import load_dotenv
 
@@ -91,7 +90,7 @@ def sqlite_targets() -> DatabasePosition:
 def postgres_position() -> DatabasePosition:
     """Return the destination high-water marks, creating its schema if needed."""
     dsn = sync_postgres.load_postgres_dsn("tailscale")
-    with psycopg.connect(dsn) as connection:
+    with sync_postgres.postgres_connect(dsn) as connection:
         sync_postgres.create_postgres_schema(connection)
         return (
             sync_postgres.postgres_max(connection, "rounds", "round_id"),

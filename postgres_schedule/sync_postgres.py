@@ -15,6 +15,9 @@ load_dotenv(ENV_PATH)
 
 SQLITE_PATH = Path(os.getenv("SQLITE_PATH"))
 BATCH_SIZE = 1000
+POSTGRES_CONNECT_TIMEOUT_SECONDS = 30
+POSTGRES_STATEMENT_TIMEOUT_MS = 120_000
+POSTGRES_LOCK_TIMEOUT_MS = 30_000
 
 ROUND_COLUMNS = (
     "round_id", "pc_start", "pc_end", "duration_s", "nodes_csv",
@@ -143,10 +146,22 @@ def postgres_max(connection: psycopg.Connection, table: str, key: str) -> int:
 def test_postgres_connection(dsn: str) -> None:
     """Verify PostgreSQL is reachable before starting a sync."""
     try:
-        with psycopg.connect(dsn) as connection:
+        with postgres_connect(dsn) as connection:
             connection.execute("SELECT 1")
     except psycopg.Error as error:
         raise ConnectionError(f"PostgreSQL connection failed: {error}") from error
+
+
+def postgres_connect(dsn: str) -> psycopg.Connection:
+    """Open PostgreSQL with bounded connection, query, and lock waits."""
+    return psycopg.connect(
+        dsn,
+        connect_timeout=POSTGRES_CONNECT_TIMEOUT_SECONDS,
+        options=(
+            f"-c statement_timeout={POSTGRES_STATEMENT_TIMEOUT_MS} "
+            f"-c lock_timeout={POSTGRES_LOCK_TIMEOUT_MS}"
+        ),
+    )
 
 
 def fetch_rounds(sqlite_connection: sqlite3.Connection, after_id: int) -> list[tuple]:
@@ -224,7 +239,7 @@ def batch_sync(connection_type: str) -> None:
     test_postgres_connection(dsn)
 
     with closing(connect_sqlite()) as sqlite_connection:
-        with psycopg.connect(dsn) as postgres:
+        with postgres_connect(dsn) as postgres:
             create_postgres_schema(postgres)
 
             latest_round = postgres_max(postgres, "rounds", "round_id")
@@ -251,7 +266,7 @@ def main() -> None:
     test_postgres_connection(dsn)
 
     with closing(connect_sqlite()) as sqlite_connection:
-        with psycopg.connect(dsn) as postgres:
+        with postgres_connect(dsn) as postgres:
             create_postgres_schema(postgres)
 
             latest_round = postgres_max(postgres, "rounds", "round_id")
