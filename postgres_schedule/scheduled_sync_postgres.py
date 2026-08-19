@@ -67,7 +67,7 @@ def catch_up_to(targets: DatabasePosition) -> None:
 
     while not targets_reached(position, targets):
         previous_position = position
-        sync_postgres.main()
+        sync_postgres.batch_sync("local")
         position = postgres_position()
         log(
             f"Sync progress: {format_position(position)}; "

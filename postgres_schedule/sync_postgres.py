@@ -42,9 +42,9 @@ def load_postgres_dsn(connection_type: str = "local") -> str:
     """
 
     if connection_type == "tailscale":
-        dsn = os.getenv("TAILSCALE_POSTGRES_DSN", "postgresql://holzofen:biofilter@100.100.51.120/sensor_data")
+        dsn = os.getenv("TAILSCALE_POSTGRES_DSN", "postgresql://holzofen:biofilter@100.100.51.120:5454/sensor_data")
     elif connection_type == "local":
-        dsn = os.getenv("LOCAL_POSTGRES_DSN", "postgresql://holzofen:biofilter@localhost/sensor_data")
+        dsn = os.getenv("LOCAL_POSTGRES_DSN", "postgresql://holzofen:biofilter@localhost:5432/sensor_data")
     else:
         raise ValueError("Invalid connection type. Use 'tailscale' or 'local'.")
     if not dsn:
@@ -140,6 +140,15 @@ def postgres_max(connection: psycopg.Connection, table: str, key: str) -> int:
         return int(cursor.fetchone()[0])
 
 
+def test_postgres_connection(dsn: str) -> None:
+    """Verify PostgreSQL is reachable before starting a sync."""
+    try:
+        with psycopg.connect(dsn) as connection:
+            connection.execute("SELECT 1")
+    except psycopg.Error as error:
+        raise ConnectionError(f"PostgreSQL connection failed: {error}") from error
+
+
 def fetch_rounds(sqlite_connection: sqlite3.Connection, after_id: int) -> list[tuple]:
     columns = ", ".join(ROUND_COLUMNS)
     rows = sqlite_connection.execute(
@@ -210,9 +219,36 @@ def sync_table(
     if len(rows) == BATCH_SIZE:
         print(f"{table}: batch limit reached; run the script again for more rows.")
 
+def batch_sync(connection_type: str) -> None:
+    dsn = load_postgres_dsn(connection_type)
+    test_postgres_connection(dsn)
+
+    with closing(connect_sqlite()) as sqlite_connection:
+        with psycopg.connect(dsn) as postgres:
+            create_postgres_schema(postgres)
+
+            latest_round = postgres_max(postgres, "rounds", "round_id")
+            round_rows = fetch_rounds(sqlite_connection, latest_round)
+            sync_table(
+                postgres, "rounds", "round_id", ROUND_COLUMNS, round_rows
+            )
+
+            available_round = postgres_max(postgres, "rounds", "round_id")
+            latest_measurement = postgres_max(postgres, "measurement", "id")
+            measurement_rows = fetch_measurements(
+                sqlite_connection, latest_measurement, available_round
+            )
+            sync_table(
+                postgres,
+                "measurement",
+                "id",
+                MEASUREMENT_COLUMNS,
+                measurement_rows,
+            )
 
 def main() -> None:
     dsn = load_postgres_dsn("tailscale")
+    test_postgres_connection(dsn)
 
     with closing(connect_sqlite()) as sqlite_connection:
         with psycopg.connect(dsn) as postgres:

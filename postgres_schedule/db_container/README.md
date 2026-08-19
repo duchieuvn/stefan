@@ -9,4 +9,4 @@ scp holzofen@10.10.64.27:/home/holzofen/Schreibtisch/data_backup/sensor_data.dum
 
 ## Build and run docker container
 
-docker compose up -d
+sudo docker compose up -d

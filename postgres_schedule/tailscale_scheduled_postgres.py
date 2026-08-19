@@ -2,25 +2,78 @@
 """Run the SQLite-to-PostgreSQL synchronization on a two-hour schedule."""
 
 from contextlib import closing
-from datetime import datetime
+import logging
+from logging.handlers import RotatingFileHandler
+import os
+from pathlib import Path
+import sys
 import time
 from typing import Callable
 
 import psycopg
 import sync_postgres
+from dotenv import load_dotenv
 
 
 RUN_INTERVAL_SECONDS = 2 * 60 * 60
 MAX_RETRIES = 5
 INITIAL_RETRY_DELAY_SECONDS = 5
+ENV_PATH = Path(".env")
+load_dotenv(ENV_PATH)
+LOG_DIRECTORY = Path(
+    os.getenv("LOG_DIRECTORY", "logs/tailscale_scheduled_postgres/")
+).expanduser()
+INFO_LOG_PATH = LOG_DIRECTORY / "info.log"
+ERROR_LOG_PATH = LOG_DIRECTORY / "error.log"
+LOG_MAX_BYTES = 10 * 1024 * 1024
+LOG_BACKUP_COUNT = 5
 
 DatabasePosition = tuple[int, int]
 
 
-def log(message: str) -> None:
-    """Print a timestamped scheduler message immediately."""
-    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
-    print(f"[{timestamp}] {message}", flush=True)
+def configure_logging() -> logging.Logger:
+    """Configure separate rotating files for informational and error logs."""
+    logger = logging.getLogger("tailscale_scheduled_postgres")
+    if logger.handlers:
+        return logger
+
+    LOG_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    formatter = logging.Formatter(
+        "[%(asctime)s] %(levelname)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S%z",
+    )
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+
+    info_handler = RotatingFileHandler(
+        INFO_LOG_PATH,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    info_handler.setLevel(logging.INFO)
+    info_handler.setFormatter(formatter)
+
+    error_handler = RotatingFileHandler(
+        ERROR_LOG_PATH,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    error_handler.setLevel(logging.ERROR)
+    error_handler.setFormatter(formatter)
+
+    logger.setLevel(logging.INFO)
+    logger.addHandler(console_handler)
+    logger.addHandler(info_handler)
+    logger.addHandler(error_handler)
+    logger.propagate = False
+    return logger
+
+
+logger = configure_logging()
 
 
 def sqlite_targets() -> DatabasePosition:
@@ -60,16 +113,20 @@ def targets_reached(
 def catch_up_to(targets: DatabasePosition) -> None:
     """Run 1,000-row sync batches until both captured targets are reached."""
     position = postgres_position()
-    log(
+    logger.info(
         f"Sync progress: {format_position(position)}; "
         f"targets: {format_position(targets)}"
     )
 
     while not targets_reached(position, targets):
         previous_position = position
-        sync_postgres.main()
+        try:
+            sync_postgres.batch_sync("tailscale")
+        except ConnectionError as error:
+            logger.error("PostgreSQL connection error: %s", error)
+            raise
         position = postgres_position()
-        log(
+        logger.info(
             f"Sync progress: {format_position(position)}; "
             f"targets: {format_position(targets)}"
         )
@@ -91,24 +148,24 @@ def run_scheduled_sync(
         try:
             if targets is None:
                 targets = sqlite_targets()
-                log(
+                logger.info(
                     "Starting scheduled sync; captured "
                     f"{format_position(targets)}"
                 )
             catch_up_to(targets)
-            log(f"Scheduled sync complete at {format_position(targets)}")
+            logger.info(f"Scheduled sync complete at {format_position(targets)}")
             return True
         except Exception as error:
             if attempt == MAX_RETRIES:
-                log(
-                    f"Scheduled sync failed after {MAX_RETRIES} retries: {error}"
+                logger.error(
+                    f"Scheduled sync failed after {MAX_RETRIES} retries: {error}",
                 )
                 return False
 
             delay = INITIAL_RETRY_DELAY_SECONDS * (2**attempt)
-            log(
+            logger.error(
                 f"Sync attempt {attempt + 1} failed: {error}; "
-                f"retrying in {delay} seconds"
+                f"retrying in {delay} seconds",
             )
             sleep(delay)
 
@@ -117,17 +174,17 @@ def run_scheduled_sync(
 
 def main() -> None:
     """Run immediately, then wait two hours after each run completes."""
-    log(
+    logger.info(
         "PostgreSQL sync scheduler started "
         f"(batch size={sync_postgres.BATCH_SIZE}, interval=2 hours)"
     )
     try:
         while True:
             run_scheduled_sync()
-            log("Next scheduled sync will start in 2 hours")
+            logger.info("Next scheduled sync will start in 2 hours")
             time.sleep(RUN_INTERVAL_SECONDS)
     except KeyboardInterrupt:
-        log("PostgreSQL sync scheduler stopped")
+        logger.info("PostgreSQL sync scheduler stopped")
 
 
 if __name__ == "__main__":
