@@ -10,10 +10,10 @@ RUN sed -i "s/^#listen_addresses = 'localhost'/listen_addresses = '*'/" /usr/loc
 
 # Copy the dump file and restore script into the auto-init directory
 COPY sensor_data.dump /docker-entrypoint-initdb.d/sensor_data.dump
-COPY restore.sh /docker-entrypoint-initdb.d/01-restore.sh
+COPY db_build.sh /docker-entrypoint-initdb.d/01-db_build.sh
 
 # Ensure the entrypoint script is executable
-RUN chmod +x /docker-entrypoint-initdb.d/01-restore.sh
+RUN chmod +x /docker-entrypoint-initdb.d/01-db_build.sh
 
 # Expose standard PostgreSQL port
 EXPOSE 5432

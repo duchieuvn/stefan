@@ -20,3 +20,9 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
 EOSQL
 
 echo "Database restore and user creation complete."
+
+# Allow SCRAM-authenticated clients on the Tailscale address range.
+grep -qxF 'host    all     all     100.64.0.0/10    scram-sha-256' "$PGDATA/pg_hba.conf" || \
+    echo 'host    all     all     100.64.0.0/10    scram-sha-256' >> "$PGDATA/pg_hba.conf"
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+    -c 'SELECT pg_reload_conf();'
