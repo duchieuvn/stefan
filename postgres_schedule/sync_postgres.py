@@ -8,6 +8,7 @@ import sqlite3
 
 import psycopg
 from dotenv import load_dotenv
+from log_config import logger
 
 
 ENV_PATH = Path(".env")
@@ -227,12 +228,14 @@ def sync_table(
     previous_max = postgres_max(connection, table, key)
     inserted = insert_rows(connection, table, columns, rows)
     new_max = postgres_max(connection, table, key)
-    print(
+    logger.info(
         f"{table}: previous {key}={previous_max}, "
         f"selected={len(rows)}, inserted={inserted}, new {key}={new_max}"
     )
     if len(rows) == BATCH_SIZE:
-        print(f"{table}: batch limit reached; run the script again for more rows.")
+        logger.warning(
+            f"{table}: batch limit reached; run the script again for more rows."
+        )
 
 def batch_sync(connection_type: str) -> None:
     dsn = load_postgres_dsn(connection_type)
@@ -262,12 +265,17 @@ def batch_sync(connection_type: str) -> None:
             )
 
 def main() -> None:
+    logger.info("Starting PostgreSQL sync")
     dsn = load_postgres_dsn("tailscale")
+    logger.info("Testing PostgreSQL connection")
     test_postgres_connection(dsn)
+    logger.info("PostgreSQL connection successful")
 
     with closing(connect_sqlite()) as sqlite_connection:
+        logger.info("Connected to SQLite source: %s", SQLITE_PATH)
         with postgres_connect(dsn) as postgres:
             create_postgres_schema(postgres)
+            logger.info("PostgreSQL schema is ready")
 
             latest_round = postgres_max(postgres, "rounds", "round_id")
             round_rows = fetch_rounds(sqlite_connection, latest_round)
@@ -293,4 +301,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        raise SystemExit(f"Sync failed: {error}") from error
+        logger.exception("Sync failed: %s", error)
+        raise SystemExit(1) from error
