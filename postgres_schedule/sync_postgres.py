@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import sqlite3
 
-import psycopg
+import psycopg2
 from dotenv import load_dotenv
 from log_config import logger
 
@@ -46,7 +46,10 @@ def load_postgres_dsn(connection_type: str = "local") -> str:
     """
 
     if connection_type == "tailscale":
-        dsn = os.getenv("TAILSCALE_POSTGRES_DSN", "postgresql://holzofen:biofilter@100.100.51.120:5454/sensor_data")
+        dsn = os.getenv(
+            "TAILSCALE_POSTGRES_DSN",
+            "postgresql://holzofen:biofilter@100.123.238.21:5432/sensor_data?sslmode=prefer",
+        )
     elif connection_type == "local":
         dsn = os.getenv("LOCAL_POSTGRES_DSN", "postgresql://holzofen:biofilter@localhost:5432/sensor_data")
     else:
@@ -71,7 +74,7 @@ def connect_sqlite() -> sqlite3.Connection:
     return connection
 
 
-def create_postgres_schema(connection: psycopg.Connection) -> None:
+def create_postgres_schema(connection: psycopg2.extensions.connection) -> None:
     """Create destination tables when running against an empty database."""
     with connection.cursor() as cursor:
         cursor.execute(
@@ -133,7 +136,7 @@ def create_postgres_schema(connection: psycopg.Connection) -> None:
     connection.commit()
 
 
-def postgres_max(connection: psycopg.Connection, table: str, key: str) -> int:
+def postgres_max(connection: psycopg2.extensions.connection, table: str, key: str) -> int:
     """Return the highest synchronized key, or zero for an empty table."""
     allowed = {("rounds", "round_id"), ("measurement", "id")}
     if (table, key) not in allowed:
@@ -149,13 +152,13 @@ def test_postgres_connection(dsn: str) -> None:
     try:
         with postgres_connect(dsn) as connection:
             connection.execute("SELECT 1")
-    except psycopg.Error as error:
+    except psycopg2.Error as error:
         raise ConnectionError(f"PostgreSQL connection failed: {error}") from error
 
 
-def postgres_connect(dsn: str) -> psycopg.Connection:
+def postgres_connect(dsn: str) -> psycopg2.extensions.connection:
     """Open PostgreSQL with bounded connection, query, and lock waits."""
-    return psycopg.connect(
+    return psycopg2.connect(
         dsn,
         connect_timeout=POSTGRES_CONNECT_TIMEOUT_SECONDS,
         options=(
@@ -191,7 +194,7 @@ def fetch_measurements(
 
 
 def insert_rows(
-    connection: psycopg.Connection,
+    connection: psycopg2.extensions.connection,
     table: str,
     columns: tuple[str, ...],
     rows: list[tuple],
@@ -219,7 +222,7 @@ def insert_rows(
 
 
 def sync_table(
-    connection: psycopg.Connection,
+    connection: psycopg2.extensions.connection,
     table: str,
     key: str,
     columns: tuple[str, ...],
