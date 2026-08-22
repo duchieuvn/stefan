@@ -9,3 +9,5 @@ out_plots/
 sequence_cache/
 prototype_02/
 *.joblib
+*.dump
+*.log

@@ -6,8 +6,9 @@ import os
 from pathlib import Path
 import sqlite3
 
-import psycopg
+import psycopg2
 from dotenv import load_dotenv
+from log_config import logger
 
 
 ENV_PATH = Path(".env")
@@ -15,6 +16,9 @@ load_dotenv(ENV_PATH)
 
 SQLITE_PATH = Path(os.getenv("SQLITE_PATH"))
 BATCH_SIZE = 1000
+POSTGRES_CONNECT_TIMEOUT_SECONDS = 30
+POSTGRES_STATEMENT_TIMEOUT_MS = 120_000
+POSTGRES_LOCK_TIMEOUT_MS = 30_000
 
 ROUND_COLUMNS = (
     "round_id", "pc_start", "pc_end", "duration_s", "nodes_csv",
@@ -31,12 +35,27 @@ MEASUREMENT_COLUMNS = (
 )
 
 
-def load_postgres_dsn() -> str:
-    """Load the PostgreSQL connection string from SOFTWARE/.env."""
+def load_postgres_dsn(connection_type: str = "local") -> str:
+    """
+    Load the PostgreSQL connection string based on the connection type.
 
-    dsn = os.getenv("POSTGRES_DSN")
+    Argument:
+        connection_type: "tailscale" or "local"
+    Returns:
+        The PostgreSQL connection string.
+    """
+
+    if connection_type == "tailscale":
+        dsn = os.getenv(
+            "TAILSCALE_POSTGRES_DSN",
+            "postgresql://holzofen:biofilter@100.123.238.21:5432/sensor_data?sslmode=prefer",
+        )
+    elif connection_type == "local":
+        dsn = os.getenv("LOCAL_POSTGRES_DSN", "postgresql://holzofen:biofilter@localhost:5432/sensor_data")
+    else:
+        raise ValueError("Invalid connection type. Use 'tailscale' or 'local'.")
     if not dsn:
-        raise RuntimeError(f"POSTGRES_DSN is missing in {ENV_PATH}")
+        raise RuntimeError(f"{connection_type.upper()}_POSTGRES_DSN is missing in {ENV_PATH}")
     return dsn
 
 
@@ -55,7 +74,7 @@ def connect_sqlite() -> sqlite3.Connection:
     return connection
 
 
-def create_postgres_schema(connection: psycopg.Connection) -> None:
+def create_postgres_schema(connection: psycopg2.extensions.connection) -> None:
     """Create destination tables when running against an empty database."""
     with connection.cursor() as cursor:
         cursor.execute(
@@ -117,7 +136,7 @@ def create_postgres_schema(connection: psycopg.Connection) -> None:
     connection.commit()
 
 
-def postgres_max(connection: psycopg.Connection, table: str, key: str) -> int:
+def postgres_max(connection: psycopg2.extensions.connection, table: str, key: str) -> int:
     """Return the highest synchronized key, or zero for an empty table."""
     allowed = {("rounds", "round_id"), ("measurement", "id")}
     if (table, key) not in allowed:
@@ -126,6 +145,28 @@ def postgres_max(connection: psycopg.Connection, table: str, key: str) -> int:
     with connection.cursor() as cursor:
         cursor.execute(f"SELECT COALESCE(MAX({key}), 0) FROM {table}")
         return int(cursor.fetchone()[0])
+
+
+def test_postgres_connection(dsn: str) -> None:
+    """Verify PostgreSQL is reachable before starting a sync."""
+    try:
+        with postgres_connect(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+    except psycopg2.Error as error:
+        raise ConnectionError(f"PostgreSQL connection failed: {error}") from error
+
+
+def postgres_connect(dsn: str) -> psycopg2.extensions.connection:
+    """Open PostgreSQL with bounded connection, query, and lock waits."""
+    return psycopg2.connect(
+        dsn,
+        connect_timeout=POSTGRES_CONNECT_TIMEOUT_SECONDS,
+        options=(
+            f"-c statement_timeout={POSTGRES_STATEMENT_TIMEOUT_MS} "
+            f"-c lock_timeout={POSTGRES_LOCK_TIMEOUT_MS}"
+        ),
+    )
 
 
 def fetch_rounds(sqlite_connection: sqlite3.Connection, after_id: int) -> list[tuple]:
@@ -154,7 +195,7 @@ def fetch_measurements(
 
 
 def insert_rows(
-    connection: psycopg.Connection,
+    connection: psycopg2.extensions.connection,
     table: str,
     columns: tuple[str, ...],
     rows: list[tuple],
@@ -182,7 +223,7 @@ def insert_rows(
 
 
 def sync_table(
-    connection: psycopg.Connection,
+    connection: psycopg2.extensions.connection,
     table: str,
     key: str,
     columns: tuple[str, ...],
@@ -191,20 +232,54 @@ def sync_table(
     previous_max = postgres_max(connection, table, key)
     inserted = insert_rows(connection, table, columns, rows)
     new_max = postgres_max(connection, table, key)
-    print(
+    logger.info(
         f"{table}: previous {key}={previous_max}, "
         f"selected={len(rows)}, inserted={inserted}, new {key}={new_max}"
     )
     if len(rows) == BATCH_SIZE:
-        print(f"{table}: batch limit reached; run the script again for more rows.")
+        logger.warning(
+            f"{table}: batch limit reached; run the script again for more rows."
+        )
 
-
-def main() -> None:
-    dsn = load_postgres_dsn()
+def batch_sync(connection_type: str) -> None:
+    dsn = load_postgres_dsn(connection_type)
+    test_postgres_connection(dsn)
 
     with closing(connect_sqlite()) as sqlite_connection:
-        with psycopg.connect(dsn) as postgres:
+        with postgres_connect(dsn) as postgres:
             create_postgres_schema(postgres)
+
+            latest_round = postgres_max(postgres, "rounds", "round_id")
+            round_rows = fetch_rounds(sqlite_connection, latest_round)
+            sync_table(
+                postgres, "rounds", "round_id", ROUND_COLUMNS, round_rows
+            )
+
+            available_round = postgres_max(postgres, "rounds", "round_id")
+            latest_measurement = postgres_max(postgres, "measurement", "id")
+            measurement_rows = fetch_measurements(
+                sqlite_connection, latest_measurement, available_round
+            )
+            sync_table(
+                postgres,
+                "measurement",
+                "id",
+                MEASUREMENT_COLUMNS,
+                measurement_rows,
+            )
+
+def main() -> None:
+    logger.info("Starting PostgreSQL sync")
+    dsn = load_postgres_dsn("tailscale")
+    logger.info("Testing PostgreSQL connection")
+    test_postgres_connection(dsn)
+    logger.info("PostgreSQL connection successful")
+
+    with closing(connect_sqlite()) as sqlite_connection:
+        logger.info("Connected to SQLite source: %s", SQLITE_PATH)
+        with postgres_connect(dsn) as postgres:
+            create_postgres_schema(postgres)
+            logger.info("PostgreSQL schema is ready")
 
             latest_round = postgres_max(postgres, "rounds", "round_id")
             round_rows = fetch_rounds(sqlite_connection, latest_round)
@@ -230,4 +305,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        raise SystemExit(f"Sync failed: {error}") from error
+        logger.exception("Sync failed: %s", error)
+        raise SystemExit(1) from error

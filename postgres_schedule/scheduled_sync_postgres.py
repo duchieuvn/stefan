@@ -6,7 +6,7 @@ from datetime import datetime
 import time
 from typing import Callable
 
-import psycopg
+import psycopg2
 import sync_postgres
 
 
@@ -38,7 +38,7 @@ def sqlite_targets() -> DatabasePosition:
 def postgres_position() -> DatabasePosition:
     """Return the destination high-water marks, creating its schema if needed."""
     dsn = sync_postgres.load_postgres_dsn()
-    with psycopg.connect(dsn) as connection:
+    with psycopg2.connect(dsn) as connection:
         sync_postgres.create_postgres_schema(connection)
         return (
             sync_postgres.postgres_max(connection, "rounds", "round_id"),
@@ -67,7 +67,7 @@ def catch_up_to(targets: DatabasePosition) -> None:
 
     while not targets_reached(position, targets):
         previous_position = position
-        sync_postgres.main()
+        sync_postgres.batch_sync("local")
         position = postgres_position()
         log(
             f"Sync progress: {format_position(position)}; "

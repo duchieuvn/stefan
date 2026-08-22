@@ -1,0 +1,2 @@
+- error catch for tailscale sync
+- add file logging /opt/holzofen-project/log
