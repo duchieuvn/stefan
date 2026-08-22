@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
-db_path = Path("../a.db")
+db_path = Path("../sensor_data.db")
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,7 @@ class RTIConfig:
     alpha_ridge: float = 0.01
     alpha_smooth: float = 4.0
     alpha_time: float = 0.05
+    temporal_smoothing_window_days: int = 14
 
     display_deadband_db: float = 0.0
     fine_nx: int = 120

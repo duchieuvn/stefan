@@ -21,7 +21,12 @@ import calendar
 import joblib
 
 from config import DEFAULT_CONFIG, RTIConfig
-from database import DatabaseProvider, PostgresTunnelDatabase, SQLiteDatabase
+from database import (
+    DatabaseProvider,
+    PostgresDirectDatabase,
+    PostgresTunnelDatabase,
+    SQLiteDatabase,
+)
 from rti_temporal_core import (
     build_model_context,
     compute_temporal_sequence,
@@ -71,7 +76,7 @@ def precompute_all(config: RTIConfig, database: DatabaseProvider, force: bool = 
         return
 
     # Hardcode filtering to the last 6 months of data.
-    months_to_keep = 6
+    months_to_keep = 3
     logging.info("Filtering dates to the last %d months.", months_to_keep)
     latest_date = date.fromisoformat(max(available_dates))
     cutoff_date = _get_cutoff_date(latest_date, months_to_keep)
@@ -136,9 +141,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Pre-compute and cache RTI sequences to disk.")
     parser.add_argument(
         "--backend",
-        choices=["sqlite", "postgres"],
+        choices=["sqlite", "postgres", "postgres-direct"],
         default="sqlite",
-        help="Database backend to use (default: sqlite).",
+        help="Database backend to use. 'postgres' uses an SSH tunnel, 'postgres-direct' connects directly (default: sqlite).",
     )
     parser.add_argument("--force", action="store_true", help="Overwrite existing cache files.")
     args = parser.parse_args()
@@ -147,9 +152,12 @@ def main() -> None:
     if args.backend == "sqlite":
         logging.info("Using SQLite backend.")
         database = SQLiteDatabase.from_config(CONFIG)
-    else:  # postgres
-        logging.info("Using PostgreSQL backend.")
+    elif args.backend == "postgres":
+        logging.info("Using PostgreSQL backend via SSH tunnel.")
         database = PostgresTunnelDatabase.from_environment()
+    else:  # postgres-direct
+        logging.info("Using direct PostgreSQL backend (no SSH tunnel).")
+        database = PostgresDirectDatabase.from_environment()
 
     precompute_all(config=CONFIG, database=database, force=args.force)
 
