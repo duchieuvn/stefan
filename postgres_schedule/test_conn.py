@@ -1,4 +1,5 @@
-import psycopg2 
+#  psql -h 100.100.51.120 -p 5432 -U holzofen -d sensor_data
+import psycopg2 # currently only work with psycopg2-2.9.10
 try:
     conn = psycopg2.connect(
         host="100.100.51.120",

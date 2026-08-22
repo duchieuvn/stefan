@@ -33,6 +33,21 @@ class _SQLiteConnectionWrapper:
         """Delegate all other calls to the original connection object."""
         return getattr(self._connection, name)
 
+
+class _PostgresConnectionWrapper:
+    """Wrap psycopg2 connections with the execute interface used by the RTI core."""
+
+    def __init__(self, connection: Any):
+        self._connection = connection
+
+    def execute(self, query: str, params: tuple | None = None):
+        cursor = self._connection.cursor()
+        cursor.execute(query, params or ())
+        return cursor
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
 class SQLiteDatabase:
     """A database provider for SQLite that mimics the Postgres provider's interface."""
     def __init__(self, path: Path):
@@ -191,11 +206,12 @@ class PostgresTunnelDatabase:
         try:
             import psycopg2
 
-            return psycopg2.connect(
+            connection = psycopg2.connect(
                 self.settings.postgres_dsn,
                 host="127.0.0.1",
                 port=tunnel.local_bind_port,
             )
+            return _PostgresConnectionWrapper(connection)
         except Exception as error:
             self.invalidate()
             raise DatabaseConnectionError(f"Could not connect to PostgreSQL: {error}") from error
@@ -212,3 +228,43 @@ class PostgresTunnelDatabase:
             tunnel.stop()
         except Exception:
             pass
+
+
+@dataclass(frozen=True)
+class PostgresSettings:
+    postgres_dsn: str
+
+    @classmethod
+    def from_environment(cls, env_path: Path | None = None) -> "PostgresSettings":
+        if env_path is None:
+            env_path = Path(".env")
+        load_dotenv(env_path, override=False)
+
+        postgres_dsn = os.getenv("RTI_TAILSCALE_POSTGRES_DSN", "").strip()
+        if not postgres_dsn:
+            raise DatabaseConnectionError("Missing required setting: RTI_TAILSCALE_POSTGRES_DSN")
+        return cls(postgres_dsn=postgres_dsn)
+
+
+class PostgresDatabase:
+    """Connect directly to PostgreSQL using its Tailscale address."""
+
+    def __init__(self, settings: PostgresSettings) -> None:
+        self.settings = settings
+
+    @classmethod
+    def from_environment(cls) -> "PostgresDatabase":
+        return cls(PostgresSettings.from_environment())
+
+    def connect(self) -> Any:
+        try:
+            import psycopg2
+
+            return _PostgresConnectionWrapper(psycopg2.connect(self.settings.postgres_dsn))
+        except Exception as error:
+            raise DatabaseConnectionError(
+                f"Could not connect directly to PostgreSQL: {error}"
+            ) from error
+
+    def close(self) -> None:
+        """The provider has no persistent connection to close."""

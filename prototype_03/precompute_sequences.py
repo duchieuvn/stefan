@@ -21,7 +21,7 @@ import calendar
 import joblib
 
 from config import DEFAULT_CONFIG, RTIConfig
-from database import DatabaseProvider, PostgresTunnelDatabase, SQLiteDatabase
+from database import DatabaseProvider, PostgresDatabase, PostgresTunnelDatabase, SQLiteDatabase
 from rti_temporal_core import (
     build_model_context,
     compute_temporal_sequence,
@@ -102,10 +102,6 @@ def precompute_all(config: RTIConfig, database: DatabaseProvider, force: bool = 
         output_file = cache_dir / f"{ref_date}.joblib"
         logging.info("Processing reference date %d/%d: %s", i + 1, len(available_dates), ref_date)
 
-        if output_file.exists() and not force:
-            logging.info("Cache file already exists, skipping: %s", output_file)
-            continue
-
         try:
             logging.info("Computing temporal sequence for reference date %s...", ref_date)
             result = compute_temporal_sequence(
@@ -135,8 +131,8 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Pre-compute and cache RTI sequences to disk.")
     parser.add_argument(
-        "--backend",
-        choices=["sqlite", "postgres"],
+        "--db",
+        choices=["sqlite", "postgres", "pg-tailscale"],
         default="sqlite",
         help="Database backend to use (default: sqlite).",
     )
@@ -144,12 +140,15 @@ def main() -> None:
     args = parser.parse_args()
 
     database: DatabaseProvider
-    if args.backend == "sqlite":
+    if args.db == "sqlite":
         logging.info("Using SQLite backend.")
         database = SQLiteDatabase.from_config(CONFIG)
-    else:  # postgres
+    elif args.db == "postgres":
         logging.info("Using PostgreSQL backend.")
         database = PostgresTunnelDatabase.from_environment()
+    else:
+        logging.info("Using direct Tailscale PostgreSQL backend.")
+        database = PostgresDatabase.from_environment()
 
     precompute_all(config=CONFIG, database=database, force=args.force)
 
