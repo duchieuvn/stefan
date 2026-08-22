@@ -5,7 +5,7 @@ from contextlib import closing
 import time
 from typing import Callable
 
-import psycopg
+import psycopg2
 import sync_postgres
 from log_config import logger
 
@@ -32,7 +32,7 @@ def sqlite_targets() -> DatabasePosition:
 def postgres_position() -> DatabasePosition:
     """Return the destination high-water marks, creating its schema if needed."""
     dsn = sync_postgres.load_postgres_dsn("tailscale")
-    with psycopg.connect(dsn) as connection:
+    with psycopg2.connect(dsn) as connection:
         sync_postgres.create_postgres_schema(connection)
         return (
             sync_postgres.postgres_max(connection, "rounds", "round_id"),

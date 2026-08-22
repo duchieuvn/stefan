@@ -25,7 +25,7 @@ class _SQLiteConnectionWrapper:
         self._connection = connection
 
     def execute(self, query: str, params: tuple | None = None):
-        """Translate psycopg's %s placeholders to sqlite3's ? and execute."""
+        """Translate psycopg2's %s placeholders to sqlite3's ? and execute."""
         translated_query = query.replace("%s", "?")
         return self._connection.execute(translated_query, params or ())
 
@@ -189,9 +189,9 @@ class PostgresTunnelDatabase:
         """Return a new PostgreSQL connection through the active local forward."""
         tunnel = self._ensure_tunnel()
         try:
-            import psycopg
+            import psycopg2
 
-            return psycopg.connect(
+            return psycopg2.connect(
                 self.settings.postgres_dsn,
                 host="127.0.0.1",
                 port=tunnel.local_bind_port,

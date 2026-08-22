@@ -1,10 +1,26 @@
 services:
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: ts-postgres
+    hostname: docker-postgres
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:?Set TS_AUTHKEY in .env}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+    volumes:
+      - ./tailscale-state:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    restart: unless-stopped
+
   postgres:
     build: .
-    ports:
-      - "5454:5432"
+    container_name: private-postgres
+    network_mode: service:tailscale
+    depends_on:
+      - tailscale
     volumes:
-      - postgres_data:/opt/holzofen-project/data/postgresql_data
-
-volumes:
-  postgres_data:
+      - /home/hieu-holzofen/holzofen-project/pg_data:/var/lib/postgresql/data
+    restart: unless-stopped
