@@ -71,7 +71,7 @@ def precompute_all(config: RTIConfig, database: DatabaseProvider, force: bool = 
         return
 
     # Hardcode filtering to the last 6 months of data.
-    months_to_keep = 6
+    months_to_keep = 3
     logging.info("Filtering dates to the last %d months.", months_to_keep)
     latest_date = date.fromisoformat(max(available_dates))
     cutoff_date = _get_cutoff_date(latest_date, months_to_keep)
@@ -134,7 +134,7 @@ def main() -> None:
         "--db",
         choices=["sqlite", "postgres", "pg-tailscale"],
         default="sqlite",
-        help="Database backend to use (default: sqlite).",
+        help="Database backend to use. 'postgres' uses an SSH tunnel, 'postgres-direct' connects directly (default: sqlite).",
     )
     parser.add_argument("--force", action="store_true", help="Overwrite existing cache files.")
     args = parser.parse_args()

@@ -426,8 +426,8 @@ def load_stats_for_interval(
     end_ts: str,
     config: RTIConfig = DEFAULT_CONFIG,
 ) -> tuple[dict[tuple[int, int], dict[str, Any]], dict[str, Any]]:
-    query = sql.measurement_in_range(start_ts, end_ts)
-    cursor = con.execute(query)
+    query, params = sql.measurement_in_range(start_ts, end_ts)
+    cursor = con.execute(query, params)
 
     day_tmp = _empty_day_tmp()
 
@@ -449,58 +449,6 @@ def load_stats_for_interval(
             day_tmp["pairs"][pair]["rssi_ok"].append(float(rssi))
 
     return finalize_day_tmp(day_tmp, start_ts, end_ts, config)
-
-
-def load_stats_for_many_days(
-    con: Any,
-    dates: list[str],
-    start_hhmm: str,
-    end_hhmm: str,
-    config: RTIConfig = DEFAULT_CONFIG,
-) -> dict[str, tuple[dict[tuple[int, int], dict[str, Any]], dict[str, Any]]]:
-    if not dates:
-        return {}
-
-    first_start_ts, _ = build_interval_timestamps(min(dates), start_hhmm, end_hhmm)
-    _, last_end_ts = build_interval_timestamps(max(dates), start_hhmm, end_hhmm)
-
-    query = sql.measurement_for_many_days(first_start_ts, last_end_ts, start_hhmm, end_hhmm)
-    logging.info("Executing query for %d days: %s", len(dates), query)
-    cursor = con.execute(query)
-
-    requested_dates = set(dates)
-    tmp_by_day = {day: _empty_day_tmp() for day in dates}
-
-    for sender_id, receiver_id, ok_match, rssi, round_id, pc_ts in cursor:
-        pc_ts_s = str(pc_ts)
-        day = pc_ts_s[:10]
-        if day not in requested_dates:
-            continue
-
-        tmp = tmp_by_day[day]
-        tmp["n_rows"] += 1
-        pair = pair_key(sender_id, receiver_id)
-        tmp["pairs"][pair]["n_total"] += 1
-
-        if round_id is not None:
-            tmp["round_ids"].add(int(round_id))
-
-        if tmp["first_ts"] is None:
-            tmp["first_ts"] = pc_ts_s
-        tmp["last_ts"] = pc_ts_s
-
-        if int(ok_match or 0) == 1 and rssi is not None:
-            tmp["n_ok_rows"] += 1
-            tmp["pairs"][pair]["n_ok"] += 1
-            tmp["pairs"][pair]["rssi_ok"].append(float(rssi))
-
-    result: dict[str, tuple[dict[tuple[int, int], dict[str, Any]], dict[str, Any]]] = {}
-    for day in dates:
-        start_ts, end_ts = build_interval_timestamps(day, start_hhmm, end_hhmm)
-        result[day] = finalize_day_tmp(tmp_by_day[day], start_ts, end_ts, config)
-
-    return result
-
 
 def build_y_vector_for_pairs(
     ref_stats: dict[tuple[int, int], dict[str, Any]],
@@ -847,15 +795,11 @@ def ensure_many_intervals_cached(
     if not missing_dates:
         return
 
-    con = database.connect()
-    try:
-        loaded = load_stats_for_many_days(con, missing_dates, start_hhmm, end_hhmm, config)
-    finally:
-        con.close()
-
-    for day, value in loaded.items():
-        start_ts, end_ts = build_interval_timestamps(day, start_hhmm, end_hhmm)
-        interval_cache[(start_ts, end_ts)] = value
+    logging.info("Loading %d missing intervals individually.", len(missing_dates))
+    for day in missing_dates:
+        # load_interval_cached already handles connecting/closing the DB and caching.
+        # It will now use the updated sql.measurement_in_range with parameters.
+        load_interval_cached(day, start_hhmm, end_hhmm, interval_cache, database, config)
 
 
 def compute_temporal_sequence(
@@ -875,53 +819,110 @@ def compute_temporal_sequence(
         database,
         config,
     )
-    logging.info("Checking interval cached %s", ref_date)
-    ensure_many_intervals_cached(
-        sequence_dates,
-        config.cur_start_hhmm,
-        config.cur_end_hhmm,
-        interval_cache,
-        database,
-        config,
-    )
 
-    W_list: list[np.ndarray] = []
-    y_list: list[np.ndarray] = []
-    times: list[datetime] = []
-    cur_meta_list: list[dict[str, Any]] = []
-    details_list: list[list[dict[str, Any]]] = []
-    valid_counts: list[int] = []
+    reference_index = sequence_dates.index(ref_date)
+    T = len(sequence_dates)
+    n_cells = context.Q.shape[0]
+    x_all = np.zeros((T, n_cells), dtype=float)
+    times: list[datetime] = [
+        interval_midpoint(d, config.cur_start_hhmm, config.cur_end_hhmm) for d in sequence_dates
+    ]
+    cur_meta_list: list[dict[str, Any]] = [{} for _ in range(T)]
+    details_list: list[list[dict[str, Any]]] = [[] for _ in range(T)]
+    valid_counts: list[int] = [0 for _ in range(T)]
 
-    for date_txt in sequence_dates:
-        cur_stats, cur_meta = load_interval_cached(
-            date_txt,
+    # Pre-calculate all time deltas for the final result object
+    dt_days_list: list[float] = []
+    for t in range(1, T):
+        dt_days_list.append(elapsed_days(times[t - 1], times[t]))
+
+    window_size = config.temporal_smoothing_window_days
+    logging.info("Solving temporal sequence in chunks of up to %d days.", window_size)
+
+    # Main loop over chunks
+    for i in range(0, T, window_size):
+        chunk_start_idx = i
+        chunk_end_idx = min(i + window_size, T)
+        logging.info("Processing chunk: dates %d to %d.", chunk_start_idx, chunk_end_idx - 1)
+
+        chunk_indices = range(chunk_start_idx, chunk_end_idx)
+        chunk_dates = [sequence_dates[j] for j in chunk_indices]
+
+        # Fetch data just-in-time for this chunk
+        ensure_many_intervals_cached(
+            chunk_dates,
             config.cur_start_hhmm,
             config.cur_end_hhmm,
             interval_cache,
             database,
             config,
         )
-        y_t, valid_mask_t, details_t = build_y_vector_for_pairs(ref_stats, cur_stats, context.pairs, config)
-        W_t = context.W[valid_mask_t, :]
 
-        W_list.append(W_t)
-        y_list.append(y_t)
-        times.append(interval_midpoint(date_txt, config.cur_start_hhmm, config.cur_end_hhmm))
-        cur_meta_list.append(cur_meta)
-        details_list.append(details_t)
-        valid_counts.append(int(np.sum(valid_mask_t)))
+        # Build W and y lists for this chunk
+        chunk_W: list[np.ndarray] = []
+        chunk_y: list[np.ndarray] = []
+        chunk_times: list[datetime] = []
 
-    reference_index = sequence_dates.index(ref_date)
-    x_all, dt_days_list = solve_temporal_smooth_rti_block_tridiagonal(
-        W_list=W_list,
-        y_list=y_list,
-        Q=context.Q,
-        times=times,
-        reference_index=reference_index,
-        alpha_ridge=config.alpha_ridge,
-        alpha_smooth=config.alpha_smooth,
-        alpha_time=config.alpha_time,
-    )
+        for j, date_txt in zip(chunk_indices, chunk_dates):
+            cur_stats, cur_meta = load_interval_cached(
+                date_txt,
+                config.cur_start_hhmm,
+                config.cur_end_hhmm,
+                interval_cache,
+                database,
+                config,
+            )
+            y_t, valid_mask_t, details_t = build_y_vector_for_pairs(
+                ref_stats, cur_stats, context.pairs, config
+            )
+            W_t = context.W[valid_mask_t, :]
+
+            chunk_W.append(W_t)
+            chunk_y.append(y_t)
+            chunk_times.append(times[j])
+
+            # Store metadata in the global result lists
+            cur_meta_list[j] = cur_meta
+            details_list[j] = details_t
+            valid_counts[j] = int(np.sum(valid_mask_t))
+
+        # Solve the chunk
+        if chunk_start_idx <= reference_index < chunk_end_idx:
+            # This chunk contains the reference, solve it with the anchor.
+            chunk_ref_idx = reference_index - chunk_start_idx
+            x_chunk, _ = solve_temporal_smooth_rti_block_tridiagonal(
+                W_list=chunk_W,
+                y_list=chunk_y,
+                Q=context.Q,
+                times=chunk_times,
+                reference_index=chunk_ref_idx,
+                alpha_ridge=config.alpha_ridge,
+                alpha_smooth=config.alpha_smooth,
+                alpha_time=config.alpha_time,
+            )
+        else:
+            # This chunk does not contain the reference. Solve it as a single segment.
+            # This requires replicating the setup logic from the main solver.
+            I = np.eye(n_cells, dtype=float)
+            diag_blocks: list[np.ndarray] = []
+            rhs_blocks: list[np.ndarray] = []
+            for W_t, y_t in zip(chunk_W, chunk_y):
+                A_data = W_t.T @ W_t if W_t.shape[0] > 0 else np.zeros((n_cells, n_cells), dtype=float)
+                b_data = W_t.T @ y_t if W_t.shape[0] > 0 else np.zeros(n_cells, dtype=float)
+                diag_blocks.append(A_data + config.alpha_ridge * I + config.alpha_smooth * context.Q)
+                rhs_blocks.append(b_data)
+
+            betas: list[float] = []
+            for t in range(1, len(chunk_times)):
+                dt_days = elapsed_days(chunk_times[t - 1], chunk_times[t])
+                beta = config.alpha_time / dt_days
+                betas.append(beta)
+                diag_blocks[t - 1] += beta * I
+                diag_blocks[t] += beta * I
+
+            x_chunk = solve_block_tridiagonal_segment(diag_blocks, rhs_blocks, betas)
+
+        x_all[chunk_start_idx:chunk_end_idx, :] = x_chunk
 
     x_disp_all = np.vstack([prepare_display_values(row, config) for row in x_all])
     vmin, vmax = global_symmetric_limits(x_all)

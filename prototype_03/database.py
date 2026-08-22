@@ -89,6 +89,37 @@ class SQLiteDatabase:
 class DatabaseConnectionError(RuntimeError):
     """Raised when the SSH tunnel or PostgreSQL connection cannot be opened."""
 
+class PostgresDirectDatabase:
+    """A database provider for a direct PostgreSQL connection without an SSH tunnel."""
+
+    def __init__(self, dsn: str):
+        self.dsn = dsn
+
+    def connect(self) -> Any:
+        """Return a new direct PostgreSQL connection."""
+        try:
+            import psycopg
+            return psycopg.connect(self.dsn)
+        except ImportError as error:
+            raise DatabaseConnectionError("psycopg is not installed") from error
+        except Exception as error:
+            raise DatabaseConnectionError(f"Could not connect directly to PostgreSQL: {error}") from error
+
+    def close(self) -> None:
+        """The provider object itself has no persistent connection to close."""
+        pass
+
+    @classmethod
+    def from_environment(cls, env_path: Path | None = None) -> "PostgresDirectDatabase":
+        if env_path is None:
+            env_path = Path(".env")
+        load_dotenv(env_path, override=False)
+
+        dsn = os.getenv("RTI_POSTGRES_DSN", "").strip()
+        if not dsn:
+            raise DatabaseConnectionError(f"Missing required setting in {env_path}: RTI_POSTGRES_DSN")
+        return cls(dsn)
+
 @dataclass(frozen=True)
 class PostgresTunnelSettings:
     postgres_dsn: str
