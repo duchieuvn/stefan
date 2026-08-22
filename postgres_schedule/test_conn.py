@@ -1,7 +1,7 @@
 import psycopg2 
 try:
     conn = psycopg2.connect(
-        host="100.123.238.21",
+        host="100.100.51.120",
         port="5432",
         dbname="sensor_data",
         user="holzofen",

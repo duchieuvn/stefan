@@ -151,7 +151,8 @@ def test_postgres_connection(dsn: str) -> None:
     """Verify PostgreSQL is reachable before starting a sync."""
     try:
         with postgres_connect(dsn) as connection:
-            connection.execute("SELECT 1")
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
     except psycopg2.Error as error:
         raise ConnectionError(f"PostgreSQL connection failed: {error}") from error
 
