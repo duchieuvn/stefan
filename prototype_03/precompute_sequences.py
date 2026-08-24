@@ -133,7 +133,7 @@ def main() -> None:
     parser.add_argument(
         "--db",
         choices=["sqlite", "postgres", "pg-tailscale"],
-        default="sqlite",
+        default="pg-tailscale",
         help="Database backend to use. 'postgres' uses an SSH tunnel, 'postgres-direct' connects directly (default: sqlite).",
     )
     parser.add_argument("--force", action="store_true", help="Overwrite existing cache files.")
