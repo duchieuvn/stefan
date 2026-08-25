@@ -4,7 +4,7 @@ try:
     conn = psycopg2.connect(
         host="100.100.51.120",
         port="5432",
-        dbname="sensor_data",
+        dbname="reduced_data",
         user="holzofen",
         password="biofilter",
         sslmode="prefer"  # Matches psql's default behavior
