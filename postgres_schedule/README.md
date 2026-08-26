@@ -1,1 +1,1 @@
-nohup python app.py > my_log.log 2>&1 &
+nohup python sync_reduced_postgres.py > reduced_schedule.log 2>&1 &
