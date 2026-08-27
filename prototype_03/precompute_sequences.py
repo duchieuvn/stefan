@@ -15,8 +15,10 @@ Usage:
 """
 import argparse
 import logging
+import sqlite3
 from datetime import date
 import calendar
+from pathlib import Path
 
 import joblib
 
@@ -27,8 +29,42 @@ from rti_temporal_core import (
     compute_temporal_sequence,
     get_available_dates,
 )
+import sync_remote_sqlite
 
 CONFIG = DEFAULT_CONFIG
+
+
+def _get_local_latest_date(db_path: Path) -> str | None:
+    """Returns the most recent measurement date (YYYY-MM-DD) in the local SQLite file."""
+    con = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=10.0)
+    try:
+        row = con.execute(
+            "SELECT MAX(substr(pc_ts, 1, 10)) FROM measurement WHERE pc_ts IS NOT NULL"
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        con.close()
+
+
+def ensure_local_database_current(db_path: Path) -> None:
+    """Downloads the remote reduced database if `db_path` is missing or not from today."""
+    if not db_path.exists():
+        logging.info("Local SQLite database not found at %s. Fetching from remote...", db_path)
+        sync_remote_sqlite.sync_remote_database(db_path)
+        return
+
+    today = date.today().isoformat()
+    latest = _get_local_latest_date(db_path)
+    if latest == today:
+        logging.info("Local SQLite database is current (latest date: %s).", latest)
+        return
+
+    logging.info(
+        "Local SQLite database is stale (latest date: %s, today: %s). Fetching from remote...",
+        latest,
+        today,
+    )
+    sync_remote_sqlite.sync_remote_database(db_path)
 
 
 def _get_cutoff_date(latest_date: date, months_back: int) -> date:
@@ -124,6 +160,14 @@ def precompute_all(config: RTIConfig, database: DatabaseProvider, force: bool = 
     logging.info("Pre-computation finished.")
 
 
+def run(config: RTIConfig = CONFIG, force: bool = False) -> None:
+    """Programmatic entry point: ensures the local SQLite database is current,
+    then computes all sequences from it. Used by main.py to auto-refresh data."""
+    ensure_local_database_current(config.db_path)
+    database = SQLiteDatabase.from_config(config)
+    precompute_all(config=config, database=database, force=force)
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s [%(levelname)-8s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
@@ -133,17 +177,21 @@ def main() -> None:
     parser.add_argument(
         "--db",
         choices=["sqlite", "postgres", "pg-tailscale"],
-        default="pg-tailscale",
-        help="Database backend to use. 'postgres' uses an SSH tunnel, 'postgres-direct' connects directly (default: sqlite).",
+        default="sqlite",
+        help="Database backend to use. 'sqlite' uses the local reduced_data.db (syncing it from the "
+        "remote Tailscale host first if missing or stale), 'postgres' uses an SSH tunnel, "
+        "'pg-tailscale' connects directly (default: sqlite).",
     )
     parser.add_argument("--force", action="store_true", help="Overwrite existing cache files.")
     args = parser.parse_args()
 
-    database: DatabaseProvider
     if args.db == "sqlite":
         logging.info("Using SQLite backend.")
-        database = SQLiteDatabase.from_config(CONFIG)
-    elif args.db == "postgres":
+        run(config=CONFIG, force=args.force)
+        return
+
+    database: DatabaseProvider
+    if args.db == "postgres":
         logging.info("Using PostgreSQL backend.")
         database = PostgresTunnelDatabase.from_environment()
     else:

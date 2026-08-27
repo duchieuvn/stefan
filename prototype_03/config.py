@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
-db_path = Path("../sensor_data.db")
+db_path = Path("reduced_data.db")
 
 
 @dataclass(frozen=True)
