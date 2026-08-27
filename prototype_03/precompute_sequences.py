@@ -15,8 +15,11 @@ Usage:
 """
 import argparse
 import logging
-from datetime import date
+import re
+from dataclasses import replace
+from datetime import date, datetime, timedelta
 import calendar
+from pathlib import Path
 
 import joblib
 
@@ -27,8 +30,56 @@ from rti_temporal_core import (
     compute_temporal_sequence,
     get_available_dates,
 )
+import sync_remote_sqlite
 
 CONFIG = DEFAULT_CONFIG
+
+# e.g. reduced_data_2026-08-27_23-06-00.db
+DB_FILENAME_RE = re.compile(r"^reduced_data_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.db$")
+DB_FILENAME_TS_FORMAT = "%Y-%m-%d_%H-%M-%S"
+DB_MAX_AGE = timedelta(hours=8)
+
+
+def _db_timestamp(path: Path) -> datetime | None:
+    """Parses the YYYY-MM-DD_HH-MM-SS timestamp embedded in a `reduced_data_*.db` filename."""
+    match = DB_FILENAME_RE.match(path.name)
+    if not match:
+        return None
+    return datetime.strptime(match.group(1), DB_FILENAME_TS_FORMAT)
+
+def _find_latest_local_db(db_dir: Path) -> tuple[Path, datetime] | None:
+    """Returns the (path, timestamp) of the most recently timestamped local db file, if any."""
+    candidates = [(p, _db_timestamp(p)) for p in db_dir.glob("reduced_data_*.db")]
+    candidates = [(p, ts) for p, ts in candidates if ts is not None]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[1])
+
+
+def ensure_local_database_current(db_dir: Path, max_age: timedelta = DB_MAX_AGE) -> Path:
+    """Returns a local `reduced_data_YYYY-MM-DD_HH-MM-SS.db` file, downloading a fresh
+    copy from the remote host if the newest local one is older than `max_age` (or missing)."""
+    db_dir.mkdir(parents=True, exist_ok=True)
+
+    latest = _find_latest_local_db(db_dir)
+    if latest is not None:
+        path, ts = latest
+        age = datetime.now() - ts
+        if age < max_age:
+            logging.info("Local SQLite database is current (%s, age %s).", path.name, age)
+            return path
+        logging.info(
+            "Local SQLite database is stale (%s, age %s >= %s). Fetching from remote...",
+            path.name,
+            age,
+            max_age,
+        )
+    else:
+        logging.info("No local SQLite database found in %s. Fetching from remote...", db_dir)
+
+    new_path = db_dir / f"reduced_data_{datetime.now():{DB_FILENAME_TS_FORMAT}}.db"
+    sync_remote_sqlite.sync_remote_database(new_path)
+    return new_path
 
 
 def _get_cutoff_date(latest_date: date, months_back: int) -> date:
@@ -124,6 +175,15 @@ def precompute_all(config: RTIConfig, database: DatabaseProvider, force: bool = 
     logging.info("Pre-computation finished.")
 
 
+def run(config: RTIConfig = CONFIG, force: bool = False) -> None:
+    """Programmatic entry point: ensures the local SQLite database is current,
+    then computes all sequences from it. Used by main.py to auto-refresh data."""
+    db_path = ensure_local_database_current(config.db_path.parent)
+    config = replace(config, db_path=db_path)
+    database = SQLiteDatabase.from_config(config)
+    precompute_all(config=config, database=database, force=force)
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s [%(levelname)-8s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
@@ -133,17 +193,22 @@ def main() -> None:
     parser.add_argument(
         "--db",
         choices=["sqlite", "postgres", "pg-tailscale"],
-        default="pg-tailscale",
-        help="Database backend to use. 'postgres' uses an SSH tunnel, 'postgres-direct' connects directly (default: sqlite).",
+        default="sqlite",
+        help="Database backend to use. 'sqlite' uses the newest local reduced_data_*.db "
+        "(syncing a fresh one from the remote Tailscale host first if missing or older than "
+        f"{DB_MAX_AGE}), 'postgres' uses an SSH tunnel, 'pg-tailscale' connects directly "
+        "(default: sqlite).",
     )
     parser.add_argument("--force", action="store_true", help="Overwrite existing cache files.")
     args = parser.parse_args()
 
-    database: DatabaseProvider
     if args.db == "sqlite":
         logging.info("Using SQLite backend.")
-        database = SQLiteDatabase.from_config(CONFIG)
-    elif args.db == "postgres":
+        run(config=CONFIG, force=args.force)
+        return
+
+    database: DatabaseProvider
+    if args.db == "postgres":
         logging.info("Using PostgreSQL backend.")
         database = PostgresTunnelDatabase.from_environment()
     else:

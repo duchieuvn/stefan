@@ -17,7 +17,9 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 import logging
+import threading
 import tkinter as tk
+from datetime import date
 from tkinter import ttk, messagebox
 
 import joblib
@@ -26,6 +28,7 @@ matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
+import precompute_sequences
 from config import DEFAULT_CONFIG, RTIConfig
 from rti_temporal_core import (
     RTIModelContext,
@@ -553,6 +556,51 @@ class RTITemporalSliderApp:
             self.canvas.draw_idle()
 
 
+def _sequence_cache_is_current(config: RTIConfig) -> bool:
+    """True if the newest pre-computed sequence file is for today's date."""
+    date_files = sorted(config.sequence_cache_dir.glob("????-??-??.joblib"))
+    if not date_files:
+        return False
+    return date_files[-1].stem == date.today().isoformat()
+
+
+def _run_precompute_with_progress(config: RTIConfig = CONFIG) -> None:
+    """Runs precompute_sequences.run() in a background thread behind a splash window."""
+    splash = tk.Tk()
+    splash.title("Bitte warten")
+    splash.geometry("440x120")
+    splash.resizable(False, False)
+
+    status_var = tk.StringVar(value="Aktualisiere Datenbank und berechne Sequenzen ...")
+    ttk.Label(splash, textvariable=status_var, wraplength=400, padding=16).pack()
+    progress = ttk.Progressbar(splash, mode="indeterminate")
+    progress.pack(fill="x", padx=16, pady=(0, 16))
+    progress.start(12)
+
+    outcome: dict[str, Exception | None] = {"error": None}
+
+    def worker() -> None:
+        try:
+            precompute_sequences.run(config=config)
+        except Exception as error:
+            outcome["error"] = error
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+
+    def poll() -> None:
+        if thread.is_alive():
+            splash.after(200, poll)
+        else:
+            splash.destroy()
+
+    splash.after(200, poll)
+    splash.mainloop()
+
+    if outcome["error"] is not None:
+        raise outcome["error"]
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -560,6 +608,16 @@ def main() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     logging.info("Starting RTI Temporal Slider App.")
+
+    if not _sequence_cache_is_current(CONFIG):
+        logging.info("Pre-computed sequence cache is missing or not from today. Running precompute_sequences...")
+        try:
+            _run_precompute_with_progress(CONFIG)
+        except Exception as error:
+            logging.exception("Failed to precompute sequences.")
+            messagebox.showerror("Fehler", f"Vorberechnung fehlgeschlagen:\n{error}")
+            return
+
     root = tk.Tk()
     app = RTITemporalSliderApp(root)
     if root.winfo_exists():
