@@ -46,7 +46,7 @@ class RemoteSQLiteSettings:
                 raise RemoteSyncError(f"Missing required setting in {env_path}: {name}")
             return value
 
-        known_hosts = Path(required("RTI_SQLITE_SSH_KNOWN_HOSTS")).expanduser()
+        known_hosts = Path(required("RTI_SSH_KNOWN_HOSTS")).expanduser()
         if not known_hosts.is_file():
             raise RemoteSyncError(
                 f"RTI_SQLITE_SSH_KNOWN_HOSTS does not exist or is not a file: {known_hosts}"
@@ -59,10 +59,10 @@ class RemoteSQLiteSettings:
             raise RemoteSyncError("RTI_SQLITE_SSH_PORT must be an integer") from error
 
         return cls(
-            host=required("RTI_SQLITE_SSH_HOST"),
+            host=required("RTI_SSH_HOST"),
             port=port,
-            user=required("RTI_SQLITE_SSH_USER"),
-            password=required_secret("RTI_SQLITE_SSH_PASSWORD"),
+            user=required("RTI_SSH_USER"),
+            password=required_secret("RTI_SSH_PASSWORD"),
             known_hosts=known_hosts,
             remote_path=required("RTI_SQLITE_REMOTE_PATH"),
         )
