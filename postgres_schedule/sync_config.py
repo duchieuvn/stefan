@@ -14,7 +14,7 @@ SQLITE_PATHS = {
 }
 
 POSTGRES_DSNS = {
-    ("main", "tailscale"): "postgresql://holzofen:biofilter@100.123.238.21:5432/sensor_data",
+    ("main", "tailscale"): "postgresql://holzofen:biofilter@100.100.51.120:5432/sensor_data",
     ("main", "local"): "postgresql://holzofen:biofilter@localhost:5432/sensor_data",
     ("reduced", "tailscale"): "postgresql://TODO:TODO@TODO:5432/TODO",  # TODO: fill in
     ("reduced", "local"): "postgresql://TODO:TODO@TODO:5432/TODO",  # TODO: fill in
