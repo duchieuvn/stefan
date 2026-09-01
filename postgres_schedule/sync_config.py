@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 SQLITE_PATHS = {
-    "main": "/home/duchieuvn/Code/stefan/sensor_data.db",
+    "main": "/home/holzofen/Schreibtisch/prototype_01/sensor_data.db",
     "reduced": "/home/holzofen/Schreibtisch/prototype_01/reduce_sqlite.db", 
 }
 

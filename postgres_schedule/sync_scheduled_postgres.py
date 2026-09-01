@@ -249,8 +249,8 @@ if __name__ == "__main__":
 # # Run continuously on the default schedule (every 2 hours)
 # python sync_scheduled_postgres.py
 
-# # Run continuously with a custom interval (seconds)
-# python sync_scheduled_postgres.py --interval-seconds 900
+# # Run continuously with a custom interval (seconds) 1800 = 30 minutes
+# python sync_scheduled_postgres.py --interval-seconds 1800
 
 # # Background it so it survives after the shell exits
 # nohup python sync_scheduled_postgres.py --source reduced > reduced_schedule.log 2>&1 &
