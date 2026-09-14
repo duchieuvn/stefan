@@ -6,3 +6,7 @@ nohup python -u your_script.py > output.log 2>&1 &
 
 - no log output  
 nohup python -u your_script.py > /dev/null 2>&1 &
+
+- tailscale reset
+sudo systemctl restart tailscaled
+sudo tailscale up
