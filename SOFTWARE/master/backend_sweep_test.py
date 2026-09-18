@@ -13,7 +13,8 @@ from typing import Optional, Dict, Any, List, Tuple
 # =========================
 # CONFIG (adjust as needed!)
 # =========================
-PORT = "/dev/ttyUSB1"
+# Node bus is on the FTDI adapter; by-id path survives ttyUSB renumbering
+PORT = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A5069RR4-if00-port0"
 BAUDRATE = 9600
 DB_PATH = "sensor_data_sweep.db"   # separate DB, so manual lora_logger_03 runs don't get mixed in
 
@@ -38,16 +39,16 @@ SWEEP_CONFIGS: List[Dict[str, Any]] = [
     {"freq_mhz": 433.1, "tx_power": 16, "sf": 12, "bw_khz": 125, "cr_denom": 8},
     {"freq_mhz": 433.1, "tx_power": 22, "sf": 12, "bw_khz": 125, "cr_denom": 8},
 
-    {"freq_mhz": 445.0, "tx_power": 4, "sf": 12, "bw_khz": 125, "cr_denom": 8},
-    {"freq_mhz": 445.0, "tx_power": 6, "sf": 12, "bw_khz": 125, "cr_denom": 8},
-    {"freq_mhz": 445.0, "tx_power": 10, "sf": 12, "bw_khz": 125, "cr_denom": 8},
-    {"freq_mhz": 445.0, "tx_power": 12, "sf": 12, "bw_khz": 125, "cr_denom": 8},
-    {"freq_mhz": 445.0, "tx_power": 16, "sf": 12, "bw_khz": 125, "cr_denom": 8},
-    {"freq_mhz": 445.0, "tx_power": 22, "sf": 12, "bw_khz": 125, "cr_denom": 8},
+    {"freq_mhz": 446.1, "tx_power": 4, "sf": 12, "bw_khz": 125, "cr_denom": 8},
+    {"freq_mhz": 446.1, "tx_power": 6, "sf": 12, "bw_khz": 125, "cr_denom": 8},
+    {"freq_mhz": 446.1, "tx_power": 10, "sf": 12, "bw_khz": 125, "cr_denom": 8},
+    {"freq_mhz": 446.1, "tx_power": 12, "sf": 12, "bw_khz": 125, "cr_denom": 8},
+    {"freq_mhz": 446.1, "tx_power": 16, "sf": 12, "bw_khz": 125, "cr_denom": 8},
+    {"freq_mhz": 446.1, "tx_power": 22, "sf": 12, "bw_khz": 125, "cr_denom": 8},
 ]
 
-RUN_MAX_ROUNDS = 1000        # rounds per configuration (only stop condition)
-MEASURE_INTERVAL_S = 120.0   # spacing between round starts (duty-cycle control)
+RUN_MAX_ROUNDS = 200        # rounds per configuration (only stop condition)
+MEASURE_INTERVAL_S = 30.0   # spacing between round starts (duty-cycle control)
 CONFIG_SETTLE_S = 1.0    # wait time after switching, until the radio is stable
 
 # Register map
@@ -804,6 +805,33 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
 # =========================
 # Sweep control
 # =========================
+def ensure_connected(client) -> None:
+    """pymodbus closes the port after retries+3 missed replies and does not
+    reopen it by itself, so reconnect before each block of requests."""
+    if not client.connected:
+        log("[Modbus] connection closed, reconnecting...")
+        client.connect()
+
+
+def preflight_check(client) -> bool:
+    """Reads the LoRa config registers from every node once. Returns True if at
+    least one node answers."""
+    ok_any = False
+    for sid in NODES:
+        try:
+            res = _call(client.read_holding_registers, address=LORA_BASE, count=5, device_id=sid)
+            if res is not None and not res.isError():
+                log(f"[Node {sid}] reachable, LoRa regs 400..404 = {res.registers}")
+                ok_any = True
+            else:
+                log(f"[Node {sid}] no valid response")
+        except Exception as e:
+            log(f"[Node {sid}] no response: {e}")
+        ensure_connected(client)
+    return ok_any
+
+
+
 def run_config(client, conn: sqlite3.Connection, config_id: int, cfg: Dict[str, Any], next_round: int) -> int:
     """Applies a configuration to all NODES and measures RUN_MAX_ROUNDS
     rounds, starting a round every MEASURE_INTERVAL_S. Returns the next free
@@ -828,6 +856,7 @@ def run_config(client, conn: sqlite3.Connection, config_id: int, cfg: Dict[str, 
     ok_links_sum = 0
 
     while round_id - start_round < RUN_MAX_ROUNDS:
+        ensure_connected(client)
         t_round = time.perf_counter()
         total_links, ok_links = one_round(client, conn, round_id, lora_cfg, csv_path=csv_path)
         total_links_sum += total_links
@@ -891,10 +920,17 @@ def main():
         stopbits=1,
         bytesize=8,
         parity='N',
-        timeout=0.35, retries=2,
+        timeout=1.0, retries=2,
     )
     if not client.connect():
         raise RuntimeError("Modbus connect failed")
+
+    if not preflight_check(client):
+        client.close()
+        raise RuntimeError(
+            f"No node answered on {PORT} @ {BAUDRATE}. Check: correct port (ls /dev/ttyUSB*), "
+            f"no other process using it (fuser {PORT}), RS485 adapter wiring/power, node IDs."
+        )
 
     conn = connect_db(DB_PATH, timeout_s=SQLITE_CONNECT_TIMEOUT_S)
     conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};")

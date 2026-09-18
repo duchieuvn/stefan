@@ -13,8 +13,9 @@ from typing import Any, Dict, List, Optional
 # =========================
 CSV_DIR = Path("runs_csv")                              # written by lora_logger_sweep.py
 OUT_SUMMARY_PATH = CSV_DIR / "duty_cycle_summary.csv"
+OUT_LINKS_PATH = CSV_DIR / "link_stats.csv"   # per (config, sender, receiver)
 
-WINDOW_HOURS = 2.0          # "last 2 hours" per sweep configuration
+WINDOW_HOURS: Optional[float] = None  # None = whole file; e.g. 2.0 = only the last 2h per configuration
 MIN_EVENTS_PER_SENDER = 2   # < 2 trigger timestamps -> no interval computable
 
 # Firmware assumptions that this sketch (slave/src) does not make configurable
@@ -23,7 +24,7 @@ ASSUMED_PREAMBLE_LEN = 8
 ASSUMED_CRC_ENABLED = True
 ASSUMED_EXPLICIT_HEADER = True
 
-STAT_PY_PATH = Path(__file__).resolve().parents[2] / "electronic_black_box" / "stat.py"
+STAT_PY_PATH = Path("stat.py")
 
 
 def _load_stat_module():
@@ -54,6 +55,70 @@ def log(msg: str) -> None:
 
 def parse_pc_ts(s: str) -> datetime:
     return datetime.fromisoformat(s)
+
+
+def to_float(value: Any) -> Optional[float]:
+    """CSV cells are strings; missing RX values are written as ''."""
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def percentile(sorted_values: List[float], pct: float) -> float:
+    """Linear-interpolated percentile of an already sorted list."""
+    k = (len(sorted_values) - 1) * pct / 100.0
+    lo = int(k)
+    hi = min(lo + 1, len(sorted_values) - 1)
+    return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * (k - lo)
+
+
+def describe(values: List[float], prefix: str, ndigits: int = 2) -> Dict[str, Optional[float]]:
+    """Basic descriptive statistics as '<prefix>_<stat>' columns (None if no data)."""
+    keys = ["mean", "median", "std", "min", "max", "p95"]
+    if not values:
+        return {f"{prefix}_{k}": None for k in keys}
+    v = sorted(values)
+    stats = {
+        "mean": statistics.mean(v),
+        "median": statistics.median(v),
+        "std": statistics.stdev(v) if len(v) > 1 else 0.0,
+        "min": v[0],
+        "max": v[-1],
+        "p95": percentile(v, 95),
+    }
+    return {f"{prefix}_{k}": round(stats[k], ndigits) for k in keys}
+
+
+def mean_or_none(values: List[float], ndigits: int = 2) -> Optional[float]:
+    return round(statistics.mean(values), ndigits) if values else None
+
+
+def compute_link_stats(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Packet delivery ratio and mean signal quality per (sender, receiver) link."""
+    by_link: Dict[tuple, List[Dict[str, Any]]] = {}
+    for row in rows:
+        try:
+            key = (int(row["sender_id"]), int(row["receiver_id"]))
+        except (KeyError, ValueError, TypeError):
+            continue
+        by_link.setdefault(key, []).append(row)
+
+    links = []
+    for (sender_id, receiver_id), link_rows in sorted(by_link.items()):
+        ok_rows = [r for r in link_rows if to_float(r.get("ok_match")) == 1]
+        rssi = [x for x in (to_float(r.get("rssi")) for r in ok_rows) if x is not None]
+        snr = [x for x in (to_float(r.get("snr")) for r in ok_rows) if x is not None]
+        links.append({
+            "sender_id": sender_id,
+            "receiver_id": receiver_id,
+            "attempts": len(link_rows),
+            "ok": len(ok_rows),
+            "pdr_pct": round(100.0 * len(ok_rows) / len(link_rows), 2),
+            "rssi_mean": mean_or_none(rssi),
+            "snr_mean": mean_or_none(snr),
+        })
+    return links
 
 
 def read_config_csv(path: Path) -> List[Dict[str, Any]]:
@@ -116,20 +181,23 @@ def analyze_config_csv(path: Path) -> Optional[Dict[str, Any]]:
         log(f"[skip] {path.name}: empty")
         return None
 
-    # Time window: the last WINDOW_HOURS relative to the most recent data
-    # point in this file (not relative to "now" - the sweeps are historical
-    # runs, see README.md).
+    # Time window: the whole file by default, or the last WINDOW_HOURS relative
+    # to the most recent data point in this file (not relative to "now" - the
+    # sweeps are historical runs, see README.md).
     all_ts = [parse_pc_ts(r["pc_ts"]) for r in rows if r.get("pc_ts")]
     if not all_ts:
         log(f"[skip] {path.name}: no valid pc_ts")
         return None
 
     window_end = max(all_ts)
-    window_start = window_end - timedelta(hours=WINDOW_HOURS)
+    if WINDOW_HOURS is None:
+        window_start = min(all_ts)
+    else:
+        window_start = window_end - timedelta(hours=WINDOW_HOURS)
     window_rows = [r for r, ts in zip(rows, all_ts) if window_start <= ts <= window_end]
 
     if not window_rows:
-        log(f"[skip] {path.name}: no rows in the {WINDOW_HOURS}h window")
+        log(f"[skip] {path.name}: no rows in the {window_label()} window")
         return None
 
     first = window_rows[0]
@@ -167,6 +235,22 @@ def analyze_config_csv(path: Path) -> Optional[Dict[str, Any]]:
 
     duty_values = list(per_sender_duty_pct.values())
 
+    # ---- Basic statistics beyond duty cycle ----
+    # Signal quality only counts correctly received packets (ok_match == 1);
+    # failed links have no or garbage RSSI/SNR.
+    ok_rows = [r for r in window_rows if to_float(r.get("ok_match")) == 1]
+    rssi = [x for x in (to_float(r.get("rssi")) for r in ok_rows) if x is not None]
+    snr = [x for x in (to_float(r.get("snr")) for r in ok_rows) if x is not None]
+    e2e = [x for x in (to_float(r.get("e2e_ms")) for r in window_rows) if x is not None]
+    all_intervals = [d for diffs in sender_intervals.values() for d in diffs]
+    rounds = {r.get("round_id") for r in window_rows}
+
+    links = compute_link_stats(window_rows)
+    worst_link = min(links, key=lambda l: l["pdr_pct"]) if links else None
+
+    def env_mean(col: str) -> Optional[float]:
+        return mean_or_none([x for x in (to_float(r.get(col)) for r in window_rows) if x is not None])
+
     return {
         "csv_file": path.name,
         "freq_mhz": freq_mhz,
@@ -183,14 +267,96 @@ def analyze_config_csv(path: Path) -> Optional[Dict[str, Any]]:
         "min_duty_cycle_pct": round(min(duty_values), 4),
         "max_duty_cycle_pct": round(max(duty_values), 4),
         "samples_used": len(window_rows),
+        "duration_h": round((window_end - window_start).total_seconds() / 3600.0, 2),
+        "rounds": len(rounds),
+        "total_links": len(window_rows),
+        "ok_links": len(ok_rows),
+        "pdr_pct": round(100.0 * len(ok_rows) / len(window_rows), 2),
+        "worst_link": f"{worst_link['sender_id']}->{worst_link['receiver_id']}" if worst_link else None,
+        "worst_link_pdr_pct": worst_link["pdr_pct"] if worst_link else None,
+        **describe(rssi, "rssi"),
+        **describe(snr, "snr"),
+        **describe(e2e, "e2e_ms", ndigits=1),
+        **describe(all_intervals, "interval_s", ndigits=2),
+        "bme_temp_mean": env_mean("bme_temp"),
+        "bme_hum_mean": env_mean("bme_hum"),
+        "bme_press_mean": env_mean("bme_press"),
+        "_links": links,
     }
 
 
-SUMMARY_FIELDS = [
-    "csv_file", "freq_mhz", "tx_power", "sf", "bw_khz", "cr_denom", "payload_bytes",
-    "toa_ms", "window_start", "window_end", "num_transmitters",
-    "avg_duty_cycle_pct", "min_duty_cycle_pct", "max_duty_cycle_pct", "samples_used",
+LINK_FIELDS = [
+    "csv_file", "freq_mhz", "tx_power",
+    "sender_id", "receiver_id", "attempts", "ok", "pdr_pct", "rssi_mean", "snr_mean",
 ]
+
+
+def fmt(value: Optional[float], spec: str) -> str:
+    return "n/a" if value is None else format(value, spec)
+
+
+def print_table(headers: List[str], rows: List[List[Any]], indent: str = "    ") -> None:
+    """Prints a plain left/right aligned text table (numbers right-aligned)."""
+    cells = [[("n/a" if c is None else str(c)) for c in row] for row in rows]
+    widths = [max(len(h), *(len(r[i]) for r in cells)) for i, h in enumerate(headers)]
+    numeric = [all(isinstance(row[i], (int, float)) or row[i] is None for row in rows)
+               for i in range(len(headers))]
+
+    def line(values: List[str]) -> str:
+        return "  ".join(v.rjust(w) if num else v.ljust(w)
+                         for v, w, num in zip(values, widths, numeric)).rstrip()
+
+    log(indent + line(headers))
+    log(indent + "  ".join("-" * w for w in widths))
+    for r in cells:
+        log(indent + line(r))
+
+
+STAT_KEYS = ["mean", "median", "std", "min", "max", "p95"]
+STAT_ROWS = [("RSSI [dBm]", "rssi"), ("SNR [dB]", "snr"),
+             ("e2e latency [ms]", "e2e_ms"), ("TX interval [s]", "interval_s")]
+
+
+def print_config_report(r: Dict[str, Any]) -> None:
+    log("=" * 78)
+    log(f"{r['csv_file']}")
+    log(f"  config     : freq={r['freq_mhz']:.1f}MHz pwr={r['tx_power']}dBm SF{r['sf']} "
+        f"bw={r['bw_khz']:.0f}kHz CR4/{r['cr_denom']} payload={r['payload_bytes']}B "
+        f"ToA={r['toa_ms']:.1f}ms")
+    log(f"  window     : {r['window_start']} .. {r['window_end']} "
+        f"({r['duration_h']:.2f}h, {r['rounds']} rounds, {r['samples_used']} samples)")
+    log(f"  duty cycle : avg={r['avg_duty_cycle_pct']:.4f}% min={r['min_duty_cycle_pct']:.4f}% "
+        f"max={r['max_duty_cycle_pct']:.4f}% over {r['num_transmitters']} transmitters")
+    log(f"  delivery   : PDR={r['pdr_pct']:.2f}% ({r['ok_links']}/{r['total_links']} links ok), "
+        f"worst link {r['worst_link']} = {fmt(r['worst_link_pdr_pct'], '.2f')}%")
+    log(f"  environment: T={fmt(r['bme_temp_mean'], '.2f')}C RH={fmt(r['bme_hum_mean'], '.2f')}% "
+        f"p={fmt(r['bme_press_mean'], '.2f')}hPa")
+    log("")
+    print_table(["metric", *STAT_KEYS],
+                [[label, *(r[f"{prefix}_{k}"] for k in STAT_KEYS)] for label, prefix in STAT_ROWS])
+    log("")
+    print_table(["sender", "receiver", "attempts", "ok", "PDR %", "RSSI mean", "SNR mean"],
+                [[l["sender_id"], l["receiver_id"], l["attempts"], l["ok"],
+                  l["pdr_pct"], l["rssi_mean"], l["snr_mean"]] for l in r["_links"]])
+    log("")
+
+
+def print_comparison(summaries: List[Dict[str, Any]]) -> None:
+    log("=" * 78)
+    log("Comparison across configurations")
+    print_table(
+        ["file", "MHz", "dBm", "SF", "rounds", "duty %", "PDR %", "worst link",
+         "RSSI med", "SNR med", "e2e p95 ms"],
+        [[s["csv_file"], s["freq_mhz"], s["tx_power"], s["sf"], s["rounds"],
+          s["avg_duty_cycle_pct"], s["pdr_pct"],
+          f"{s['worst_link']} ({fmt(s['worst_link_pdr_pct'], '.1f')}%)",
+          s["rssi_median"], s["snr_median"], s["e2e_ms_p95"]] for s in summaries],
+        indent="  ",
+    )
+
+
+def window_label() -> str:
+    return "full file" if WINDOW_HOURS is None else f"last {WINDOW_HOURS:g}h per file"
 
 
 def main():
@@ -203,7 +369,7 @@ def main():
         return
 
     log(f"Analyzing {len(config_csvs)} sweep configuration(s) from {CSV_DIR.resolve()} "
-        f"(window: last {WINDOW_HOURS:.0f}h per file)\n")
+        f"(window: {window_label()})\n")
 
     summaries: List[Dict[str, Any]] = []
     for path in config_csvs:
@@ -211,28 +377,32 @@ def main():
         if result is None:
             continue
         summaries.append(result)
-        log(
-            f"{result['csv_file']}: "
-            f"freq={result['freq_mhz']:.1f}MHz pwr={result['tx_power']}dBm "
-            f"SF{result['sf']} bw={result['bw_khz']:.0f}kHz CR4/{result['cr_denom']} | "
-            f"ToA={result['toa_ms']:.1f}ms | "
-            f"{result['num_transmitters']} senders | "
-            f"avg duty cycle = {result['avg_duty_cycle_pct']:.3f}% "
-            f"(min={result['min_duty_cycle_pct']:.3f}%, max={result['max_duty_cycle_pct']:.3f}%)"
-        )
+        print_config_report(result)
 
     if not summaries:
         log("\nNo configuration had enough data in the time window - no summary written.")
         return
 
+    print_comparison(summaries)
+
     CSV_DIR.mkdir(parents=True, exist_ok=True)
+    summary_fields = [k for k in summaries[0] if not k.startswith("_")]
     with OUT_SUMMARY_PATH.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=summary_fields, extrasaction="ignore")
         writer.writeheader()
         for s in summaries:
             writer.writerow(s)
 
+    with OUT_LINKS_PATH.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=LINK_FIELDS)
+        writer.writeheader()
+        for s in summaries:
+            for link in s["_links"]:
+                writer.writerow({"csv_file": s["csv_file"], "freq_mhz": s["freq_mhz"],
+                                 "tx_power": s["tx_power"], **link})
+
     log(f"\nSummary written: {OUT_SUMMARY_PATH.resolve()}")
+    log(f"Link stats written: {OUT_LINKS_PATH.resolve()}")
 
 
 if __name__ == "__main__":

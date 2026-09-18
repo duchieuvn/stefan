@@ -10,7 +10,7 @@ why each step is done the way it is.
 measurement to both SQLite and a per-configuration CSV under `runs_csv/`.
 `analyze_sweep_duty_cycle.py` reads those CSVs and, for each configuration,
 estimates the **average duty cycle across all transmitters**, using only the
-most recent `WINDOW_HOURS` (default 2h) of data in each file.
+whole file by default, or only the most recent `WINDOW_HOURS` of data in each file if set.
 
 ## Inputs
 
@@ -122,8 +122,18 @@ cadence).
 | `num_transmitters` | How many senders had enough data to include |
 | `avg_duty_cycle_pct`, `min_duty_cycle_pct`, `max_duty_cycle_pct` | Across those transmitters |
 | `samples_used` | Row count in the window (before dedup to events) |
+| `duration_h`, `rounds` | Time span and number of distinct rounds in the window |
+| `total_links`, `ok_links`, `pdr_pct` | All sender→receiver attempts, correctly received ones (`ok_match == 1`), and packet delivery ratio |
+| `worst_link`, `worst_link_pdr_pct` | The `sender->receiver` pair with the lowest PDR |
+| `rssi_*`, `snr_*` | mean / median / std / min / max / p95 over correctly received packets only |
+| `e2e_ms_*` | Same statistics for end-to-end latency (all rows) |
+| `interval_s_*` | Same statistics for the time between a sender's successive triggers |
+| `bme_temp_mean`, `bme_hum_mean`, `bme_press_mean` | Average environmental conditions during the run |
 
-The script also prints one summary line per configuration to the console.
+`runs_csv/link_stats.csv` — one row per configuration and `sender_id`/`receiver_id`
+pair: `attempts`, `ok`, `pdr_pct`, `rssi_mean`, `snr_mean`.
+
+The script also prints a short summary block per configuration to the console.
 
 ## Known limitations
 
