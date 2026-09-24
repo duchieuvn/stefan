@@ -27,28 +27,44 @@ NODES = [1, 2, 3, 4, 5, 6, 7, 8]
 
 # ---- Automated sweep --------------------------------------------------
 # Each combination is written to all NODES via Modbus (no re-flash
-# needed) and measured for RUN_MAX_ROUNDS rounds, with round starts spaced
-# MEASURE_INTERVAL_S apart. Unlike lora_logger_03.py (which asks interactively once
+# needed). The configs are interleaved: one round with config 1, one round
+# with config 2, ... up to the last config, then the pass repeats until every
+# config has RUN_MAX_ROUNDS rounds. Round starts are spaced MEASURE_INTERVAL_S
+# apart (config switch included). Unlike lora_logger_03.py (which asks interactively once
 # and then runs until Ctrl+C), this script runs through the entire list
 # unattended.
 SWEEP_CONFIGS: List[Dict[str, Any]] = [
-    {"freq_mhz": 433.1, "tx_power": 4, "sf": 12, "bw_khz": 125, "cr_denom": 8},
-    {"freq_mhz": 433.1, "tx_power": 6, "sf": 12, "bw_khz": 125, "cr_denom": 8},
-    {"freq_mhz": 433.1, "tx_power": 10, "sf": 12, "bw_khz": 125, "cr_denom": 8},
-    {"freq_mhz": 433.1, "tx_power": 12, "sf": 12, "bw_khz": 125, "cr_denom": 8},
-    {"freq_mhz": 433.1, "tx_power": 16, "sf": 12, "bw_khz": 125, "cr_denom": 8},
-    {"freq_mhz": 433.1, "tx_power": 22, "sf": 12, "bw_khz": 125, "cr_denom": 8},
-
-    {"freq_mhz": 446.1, "tx_power": 4, "sf": 12, "bw_khz": 125, "cr_denom": 8},
-    {"freq_mhz": 446.1, "tx_power": 6, "sf": 12, "bw_khz": 125, "cr_denom": 8},
-    {"freq_mhz": 446.1, "tx_power": 10, "sf": 12, "bw_khz": 125, "cr_denom": 8},
-    {"freq_mhz": 446.1, "tx_power": 12, "sf": 12, "bw_khz": 125, "cr_denom": 8},
-    {"freq_mhz": 446.1, "tx_power": 16, "sf": 12, "bw_khz": 125, "cr_denom": 8},
-    {"freq_mhz": 446.1, "tx_power": 22, "sf": 12, "bw_khz": 125, "cr_denom": 8},
+    {"freq_mhz": 433.1, "tx_power": 0 },
+    {"freq_mhz": 433.1, "tx_power": 1 },
+    {"freq_mhz": 433.1, "tx_power": 2 },
+    {"freq_mhz": 433.1, "tx_power": 3 },
+    {"freq_mhz": 433.1, "tx_power": 4 },
+    {"freq_mhz": 433.1, "tx_power": 5 },
+    {"freq_mhz": 433.1, "tx_power": 6 },
+    {"freq_mhz": 433.1, "tx_power": 7 },
+    {"freq_mhz": 433.1, "tx_power": 8 },
+    {"freq_mhz": 433.1, "tx_power": 9 },
+    {"freq_mhz": 433.1, "tx_power": 10 },
+    {"freq_mhz": 433.1, "tx_power": 11 },
+    {"freq_mhz": 433.1, "tx_power": 12 },
+    {"freq_mhz": 433.1, "tx_power": 13 },
+    {"freq_mhz": 433.1, "tx_power": 14 },
+    {"freq_mhz": 433.1, "tx_power": 15 },
+    {"freq_mhz": 433.1, "tx_power": 16 },
+    {"freq_mhz": 433.1, "tx_power": 17 },
+    {"freq_mhz": 433.1, "tx_power": 18 },
+    {"freq_mhz": 433.1, "tx_power": 19 },
+    {"freq_mhz": 433.1, "tx_power": 20 },
+    {"freq_mhz": 433.1, "tx_power": 21 },
+    {"freq_mhz": 433.1, "tx_power": 22 }
 ]
 
-RUN_MAX_ROUNDS = 200        # rounds per configuration (only stop condition)
-MEASURE_INTERVAL_S = 30.0   # spacing between round starts (duty-cycle control)
+# Applied to every SWEEP_CONFIGS entry that doesn't set these keys itself
+SWEEP_DEFAULTS: Dict[str, Any] = {"sf": 12, "bw_khz": 125, "cr_denom": 8}
+SWEEP_CONFIGS = [{**SWEEP_DEFAULTS, **c} for c in SWEEP_CONFIGS]
+
+RUN_MAX_ROUNDS = 2000      # rounds per configuration (only stop condition)
+MEASURE_INTERVAL_S = 2.0   # spacing between round starts (duty-cycle control)
 CONFIG_SETTLE_S = 1.0    # wait time after switching, until the radio is stable
 
 # Register map
@@ -832,75 +848,89 @@ def preflight_check(client) -> bool:
 
 
 
-def run_config(client, conn: sqlite3.Connection, config_id: int, cfg: Dict[str, Any], next_round: int) -> int:
-    """Applies a configuration to all NODES and measures RUN_MAX_ROUNDS
-    rounds, starting a round every MEASURE_INTERVAL_S. Returns the next free
-    round_id, so numbering stays continuous across all configs."""
-    log(f"\n#### Configuration {config_id}/{len(SWEEP_CONFIGS)}: "
-        f"freq={cfg['freq_mhz']:.1f} MHz, power={cfg['tx_power']} dBm, "
-        f"SF{cfg['sf']}, bw={cfg['bw_khz']} kHz, CR4/{cfg['cr_denom']} ####")
-
-    ok = apply_lora_config_to_all_nodes(client, cfg)
-    lora_cfg = {**cfg, "lora_applied": 1 if ok else 0, "notes": f"sweep_config_id={config_id}"}
-    time.sleep(CONFIG_SETTLE_S)
-
-    csv_path = config_csv_path(cfg)
-    init_csv(csv_path, MEASUREMENT_CSV_FIELDS)
-    log(f"[CSV] -> {csv_path}")
+def run_sweep(client, conn: sqlite3.Connection, next_round: int) -> None:
+    """Interleaves all SWEEP_CONFIGS: each pass runs one round per config
+    (config 1, config 2, ...), repeated for RUN_MAX_ROUNDS passes. A round
+    starts every MEASURE_INTERVAL_S (config switch included). round_id stays
+    continuous across all rounds. The manifest (one row per config) is
+    written at the end, also when stopped early with Ctrl+C."""
+    stats = []
+    for config_id, cfg in enumerate(SWEEP_CONFIGS, start=1):
+        csv_path = config_csv_path(cfg)
+        init_csv(csv_path, MEASUREMENT_CSV_FIELDS)
+        stats.append({
+            "config_id": config_id, "cfg": cfg, "csv_path": csv_path,
+            "start_ts": None, "end_ts": None, "duration_s": 0.0,
+            "rounds_completed": 0, "total_links": 0, "ok_links": 0,
+        })
 
     round_id = next_round
-    start_round = round_id
-    start_ts = now_iso()
-    t0 = time.perf_counter()
-    total_links_sum = 0
-    ok_links_sum = 0
+    n_cfg = len(SWEEP_CONFIGS)
+    total_rounds = RUN_MAX_ROUNDS * n_cfg
+    done_rounds = 0
 
-    while round_id - start_round < RUN_MAX_ROUNDS:
-        ensure_connected(client)
-        t_round = time.perf_counter()
-        total_links, ok_links = one_round(client, conn, round_id, lora_cfg, csv_path=csv_path)
-        total_links_sum += total_links
-        ok_links_sum += ok_links
-        round_id += 1
+    try:
+        for pass_idx in range(1, RUN_MAX_ROUNDS + 1):
+            for st in stats:
+                config_id, cfg = st["config_id"], st["cfg"]
+                t_round = time.perf_counter()
+                ensure_connected(client)
 
-        # No wait after the last round of this configuration
-        if round_id - start_round >= RUN_MAX_ROUNDS:
-            break
+                log(f"\n#### Pass {pass_idx}/{RUN_MAX_ROUNDS} | Configuration {config_id}/{n_cfg}: "
+                    f"freq={cfg['freq_mhz']:.1f} MHz, power={cfg['tx_power']} dBm, "
+                    f"SF{cfg['sf']}, bw={cfg['bw_khz']} kHz, CR4/{cfg['cr_denom']} ####")
 
-        dt = time.perf_counter() - t_round
-        sleep_s = max(0.0, float(MEASURE_INTERVAL_S) - dt)
-        if sleep_s > 0:
-            log(f"[Round {round_id - 1}] next round in {sleep_s:.1f}s")
-            time.sleep(sleep_s)
-        else:
-            log(f"[Round {round_id - 1}] WARNING: round took {dt:.1f}s > interval "
-                f"{MEASURE_INTERVAL_S:.0f}s, starting next round immediately")
+                ok = apply_lora_config_to_all_nodes(client, cfg)
+                lora_cfg = {**cfg, "lora_applied": 1 if ok else 0, "notes": f"sweep_config_id={config_id}"}
+                time.sleep(CONFIG_SETTLE_S)
 
-    end_ts = now_iso()
-    duration_s = time.perf_counter() - t0
-    rounds_completed = round_id - start_round
+                if st["start_ts"] is None:
+                    st["start_ts"] = now_iso()
+                total_links, ok_links = one_round(client, conn, round_id, lora_cfg, csv_path=st["csv_path"])
+                st["end_ts"] = now_iso()
+                st["total_links"] += total_links
+                st["ok_links"] += ok_links
+                st["rounds_completed"] += 1
+                round_id += 1
+                done_rounds += 1
 
-    init_csv(MANIFEST_CSV_PATH, MANIFEST_CSV_FIELDS)
-    append_csv_row(MANIFEST_CSV_PATH, MANIFEST_CSV_FIELDS, {
-        "config_id": config_id,
-        "freq_mhz": cfg["freq_mhz"],
-        "tx_power": cfg["tx_power"],
-        "sf": cfg["sf"],
-        "bw_khz": cfg["bw_khz"],
-        "cr_denom": cfg["cr_denom"],
-        "csv_file": csv_path.name,
-        "start_ts": start_ts,
-        "end_ts": end_ts,
-        "duration_s": round(duration_s, 1),
-        "rounds_completed": rounds_completed,
-        "total_links": total_links_sum,
-        "ok_links": ok_links_sum,
-    })
+                dt = time.perf_counter() - t_round
+                st["duration_s"] += dt
 
-    log(f"#### Configuration {config_id} done: {rounds_completed} rounds, "
-        f"{ok_links_sum}/{total_links_sum} links ok, {duration_s:.1f}s -> {csv_path.name} ####")
+                # No wait after the very last round of the sweep
+                if done_rounds >= total_rounds:
+                    break
 
-    return round_id
+                sleep_s = max(0.0, float(MEASURE_INTERVAL_S) - dt)
+                if sleep_s > 0:
+                    log(f"[Round {round_id - 1}] next round in {sleep_s:.1f}s")
+                    time.sleep(sleep_s)
+                else:
+                    log(f"[Round {round_id - 1}] WARNING: round took {dt:.1f}s > interval "
+                        f"{MEASURE_INTERVAL_S:.0f}s, starting next round immediately")
+    finally:
+        init_csv(MANIFEST_CSV_PATH, MANIFEST_CSV_FIELDS)
+        for st in stats:
+            if st["rounds_completed"] == 0:
+                continue
+            cfg = st["cfg"]
+            append_csv_row(MANIFEST_CSV_PATH, MANIFEST_CSV_FIELDS, {
+                "config_id": st["config_id"],
+                "freq_mhz": cfg["freq_mhz"],
+                "tx_power": cfg["tx_power"],
+                "sf": cfg["sf"],
+                "bw_khz": cfg["bw_khz"],
+                "cr_denom": cfg["cr_denom"],
+                "csv_file": st["csv_path"].name,
+                "start_ts": st["start_ts"],
+                "end_ts": st["end_ts"],
+                "duration_s": round(st["duration_s"], 1),
+                "rounds_completed": st["rounds_completed"],
+                "total_links": st["total_links"],
+                "ok_links": st["ok_links"],
+            })
+            log(f"#### Configuration {st['config_id']}: {st['rounds_completed']} rounds, "
+                f"{st['ok_links']}/{st['total_links']} links ok -> {st['csv_path'].name} ####")
 
 
 def main():
@@ -909,7 +939,7 @@ def main():
     print(f"CSV: {CSV_OUT_DIR.resolve()}")
     print(f"PORT: {PORT} @ {BAUDRATE}")
     print(f"NODES: {NODES}")
-    print(f"Configs: {len(SWEEP_CONFIGS)} | per config: {RUN_MAX_ROUNDS} rounds, "
+    print(f"Configs: {len(SWEEP_CONFIGS)} (interleaved) | per config: {RUN_MAX_ROUNDS} rounds, "
           f"interval {MEASURE_INTERVAL_S:.0f}s")
 
     init_db(DB_PATH)
@@ -943,11 +973,10 @@ def main():
         next_round = 1
 
     print("\n=== Start sweep ===")
-    print("Stop early with Ctrl+C (current configuration will still be saved to completion)\n")
+    print("Stop early with Ctrl+C (rounds so far are kept, manifest is still written)\n")
 
     try:
-        for i, cfg in enumerate(SWEEP_CONFIGS, start=1):
-            next_round = run_config(client, conn, i, cfg, next_round)
+        run_sweep(client, conn, next_round)
     except KeyboardInterrupt:
         print("\nStopped by user.")
     finally:

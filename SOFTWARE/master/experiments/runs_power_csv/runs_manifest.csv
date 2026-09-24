@@ -1,0 +1,1 @@
+config_id,freq_mhz,tx_power,sf,bw_khz,cr_denom,csv_file,start_ts,end_ts,duration_s,rounds_completed,total_links,ok_links
