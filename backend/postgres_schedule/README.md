@@ -1,0 +1,40 @@
+# postgres_schedule
+
+## sync_scheduled_postgres.py
+
+Syncs a source SQLite database to a target PostgreSQL database. Source/target
+pairs are named profiles (`main`, `reduced`) configured in `.env`:
+
+| Key | Meaning |
+|---|---|
+| `<SOURCE>_SQLITE_PATH` | Source SQLite file, e.g. `MAIN_SQLITE_PATH` |
+| `<SOURCE>_<CONNECTION>_DSN` | Target PostgreSQL DSN, e.g. `MAIN_TAILSCALE_DSN`, `REDUCED_LOCAL_DSN` |
+
+`.env` is loaded from this directory, so the script works from any working
+directory. Progress is printed to the console; redirect it to keep a log.
+
+```bash
+# Test the PostgreSQL connection only
+python sync_scheduled_postgres.py --check
+python sync_scheduled_postgres.py --check --source reduced
+
+# Copy one batch (up to 1000 rounds + 1000 measurements), main profile, over tailscale (defaults)
+python sync_scheduled_postgres.py --once
+
+# Copy one batch, main profile, connecting to local postgres
+python sync_scheduled_postgres.py --once --connection local
+
+# Copy one batch, reduced profile (fill in the REDUCED_* entries in .env first)
+python sync_scheduled_postgres.py --once --source reduced
+
+# Run on a schedule (default interval: 2 hours); each run catches up fully
+python sync_scheduled_postgres.py
+
+# Run on a schedule with a custom interval (in seconds)
+python sync_scheduled_postgres.py --interval-seconds 900
+
+# Background it, keep it running after the shell exits, and log to a file
+nohup python sync_scheduled_postgres.py --source reduced > reduced_schedule.log 2>&1 &
+```
+
+`--help` lists all flags.
