@@ -3,10 +3,14 @@ from __future__ import annotations
 from pymodbus.client import ModbusSerialClient
 from pymodbus.exceptions import ModbusIOException, ModbusException
 import sqlite3
+import sys
 from pathlib import Path
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Tuple
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # backend/, for service_runtime
+from service_runtime import ServiceContext
 
 
 # =========================
@@ -421,6 +425,13 @@ def ask_lora_config_manually(default_cfg: Optional[Dict[str, Any]] = None) -> Di
     }
 
 
+def lora_summary(cfg: Dict[str, Any]) -> str:
+    return (
+        f"F={cfg['freq_mhz']:.1f} MHz, P={cfg['tx_power']}, "
+        f"SF{cfg['sf']}, BW={cfg['bw_khz']}, CR=4/{cfg['cr_denom']}"
+    )
+
+
 def configure_lora_interactive(client) -> Dict[str, Any]:
     """
     1) Entweder LoRa jetzt auf alle Nodes schreiben
@@ -431,11 +442,7 @@ def configure_lora_interactive(client) -> Dict[str, Any]:
 
     if ask_yes_no("LoRa Parameter jetzt aktiv auf alle Nodes schreiben?", default_yes=True):
         cfg = ask_lora_config_manually()
-        print(
-            f"\n-> Schreibe auf alle Nodes: "
-            f"F={cfg['freq_mhz']:.1f} MHz, P={cfg['tx_power']}, "
-            f"SF{cfg['sf']}, BW={cfg['bw_khz']}, CR=4/{cfg['cr_denom']}"
-        )
+        print(f"\n-> Schreibe auf alle Nodes: {lora_summary(cfg)}")
         ok = apply_lora_config_to_all_nodes(client, cfg)
         cfg["lora_applied"] = 1 if ok else 0
         return cfg
@@ -445,16 +452,38 @@ def configure_lora_interactive(client) -> Dict[str, Any]:
     cfg = read_lora_config(client, NODES[0])
 
     if cfg is not None:
-        print(
-            f"-> Gelesen: "
-            f"F={cfg['freq_mhz']:.1f} MHz, P={cfg['tx_power']}, "
-            f"SF{cfg['sf']}, BW={cfg['bw_khz']}, CR=4/{cfg['cr_denom']}"
-        )
+        print(f"-> Gelesen: {lora_summary(cfg)}")
         return cfg
 
     print("-> Lesen fehlgeschlagen. Bitte aktuelle Werte manuell eingeben.")
     cfg = ask_lora_config_manually()
     cfg["lora_applied"] = 0
+    return cfg
+
+
+def read_lora_config_or_defaults(client) -> Dict[str, Any]:
+    """
+    Ohne Rückfragen: LoRa nicht neu setzen, aktuelle Werte aus Node 1 lesen,
+    bei Fehler die Standardwerte annehmen.
+    """
+    print("\n=== LoRa Konfiguration ===")
+    print("-> LoRa wird nicht neu gesetzt.")
+    print(f"-> Versuche aktuelle LoRa-Werte von Node {NODES[0]} zu lesen ...")
+    cfg = read_lora_config(client, NODES[0])
+
+    if cfg is not None:
+        print(f"-> Gelesen: {lora_summary(cfg)}")
+        return cfg
+
+    cfg = {
+        "freq_mhz": DEFAULT_FREQ_MHZ,
+        "tx_power": DEFAULT_POWER,
+        "sf": DEFAULT_SF,
+        "bw_khz": DEFAULT_BW,
+        "cr_denom": DEFAULT_CR,
+        "lora_applied": 0,
+    }
+    print(f"-> Lesen fehlgeschlagen. Verwende Standardwerte: {lora_summary(cfg)}")
     return cfg
 
 
@@ -612,7 +641,12 @@ def send_led_cmd(client, sid: int, on: bool) -> None:
 # =========================
 # Measurement loop
 # =========================
-def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[str, Any]) -> None:
+def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[str, Any],
+              ctx: ServiceContext) -> Optional[Dict[str, Any]]:
+    """
+    Eine Messrunde; gibt die gespeicherten Rundendaten zurück, oder None, wenn ctx
+    mitten in der Runde stoppt (die Runde wird dann verworfen).
+    """
     cur = conn.cursor()
 
     pc_start = now_iso()
@@ -646,7 +680,12 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
         except Exception:
             pass
 
+    aborted = False
     for sender_id in NODES:
+        if ctx.stopping():
+            aborted = True
+            break
+
         tx_timestamp = make_tx_timestamp_31()
 
         # Nur aktueller Sender leuchtet
@@ -687,7 +726,7 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
             deadline = time.time() + RX_TIMEOUT_S
             rx = None
 
-            while time.time() < deadline:
+            while time.time() < deadline and not ctx.stopping():
                 rx = rx_block_stable(client, receiver_id)
                 if rx is None:
                     time.sleep(RX_POLL_S)
@@ -700,6 +739,10 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
                     break
 
                 time.sleep(RX_POLL_S)
+
+            if ctx.stopping():
+                aborted = True
+                break
 
             t_match_or_timeout = time.perf_counter()
 
@@ -788,6 +831,11 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
         except Exception:
             pass
 
+    if aborted:
+        conn.rollback()
+        log(f"[Round {round_id}] gestoppt, Runde verworfen")
+        return None
+
     pc_end = now_iso()
     duration_s = float(time.perf_counter() - t_round0)
 
@@ -825,9 +873,16 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
         log(f"[DB] store_round/commit failed: {e}")
 
     log(f"[Round {round_id}] ok={ok_links}/{total_links} timeouts={timeouts} dur={duration_s:.1f}s")
+    return round_info
 
 
-def main():
+def run(ctx: ServiceContext, lora: str = "ask") -> None:
+    """
+    Misst alle MEASURE_INTERVAL_S eine Runde, bis ctx stoppt.
+
+    lora="ask":  LoRa-Fragen im Terminal stellen (Standard beim direkten Start)
+    lora="read": ohne Rückfragen, LoRa-Werte aus Node 1 lesen (für manage_services.py)
+    """
     print("=== monitor_offline logger ===")
     print(f"DB: {DB_PATH}")
     print(f"PORT: {PORT} @ {BAUDRATE}")
@@ -847,34 +902,52 @@ def main():
     if not client.connect():
         raise RuntimeError("Modbus connect failed")
 
-    conn = connect_db(DB_PATH, timeout_s=SQLITE_CONNECT_TIMEOUT_S)
+    try:
+        conn = connect_db(DB_PATH, timeout_s=SQLITE_CONNECT_TIMEOUT_S)
+    except Exception:
+        client.close()
+        raise
     conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};")
 
-    cur = conn.cursor()
     try:
-        row = cur.execute("SELECT MAX(round_id) FROM rounds;").fetchone()
-        next_round = int(row[0] or 0) + 1
-    except Exception:
-        next_round = 1
+        cur = conn.cursor()
+        try:
+            row = cur.execute("SELECT MAX(round_id) FROM rounds;").fetchone()
+            next_round = int(row[0] or 0) + 1
+        except Exception:
+            next_round = 1
 
-    lora_cfg = configure_lora_interactive(client)
+        if lora == "ask":
+            lora_cfg = configure_lora_interactive(client)
+        else:
+            lora_cfg = read_lora_config_or_defaults(client)
+        ctx.report(lora=lora_summary(lora_cfg))
 
-    print("\n=== Start measurement loop ===")
-    print("Stop with Ctrl+C\n")
+        print("\n=== Start measurement loop ===")
+        print("Stop with Ctrl+C\n")
 
-    try:
-        while True:
+        while not ctx.stopping():
             t0 = time.perf_counter()
-            one_round(client, conn, next_round, lora_cfg)
+            started = datetime.now()
+            ctx.report(activity=f"round {next_round} running")
+            info = one_round(client, conn, next_round, lora_cfg, ctx)
+            if info is None:
+                break
+            ctx.report(
+                last_run=started,
+                last_result=(
+                    f"round {next_round}: ok {info['ok_links']}/{info['total_links']} links, "
+                    f"{info['timeouts']} timeouts, {info['duration_s']:.0f}s"
+                ),
+            )
             next_round += 1
 
             dt = time.perf_counter() - t0
             sleep_s = max(0.0, float(MEASURE_INTERVAL_S) - dt)
-            if sleep_s > 0:
-                time.sleep(sleep_s)
+            ctx.report(activity=f"waiting for round {next_round}",
+                       next_run=datetime.now() + timedelta(seconds=sleep_s))
+            ctx.wait(sleep_s)
 
-    except KeyboardInterrupt:
-        print("\nStopped by user.")
     finally:
         try:
             conn.close()
@@ -884,6 +957,13 @@ def main():
             client.close()
         except Exception:
             pass
+
+
+def main():
+    try:
+        run(ServiceContext.standalone())
+    except KeyboardInterrupt:
+        print("\nStopped by user.")
 
 
 if __name__ == "__main__":

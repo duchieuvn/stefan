@@ -1,5 +1,11 @@
-import serial
+import sys
 import time
+from pathlib import Path
+
+import serial
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # backend/, for service_runtime
+from service_runtime import ServiceContext
 
 # ============================
 # Heltec settings
@@ -33,7 +39,8 @@ def send_command(heltec, command):
 # Countdown function
 # ============================
 
-def countdown(seconds, status):
+def countdown(seconds, status, ctx):
+    """Wait `seconds` showing the time left; return True if ctx asked to stop first."""
 
     end_time = time.time() + seconds
 
@@ -53,18 +60,25 @@ def countdown(seconds, status):
             flush=True
         )
 
-        time.sleep(0.1)
+        if ctx.wait(0.1):
+            print()
+            return True
 
     print(
         f"\r{status} | Time remaining: 00 seconds"
     )
+
+    return False
 
 
 # ============================
 # Main pump routine
 # ============================
 
-def run_pump_cycles(cycles=100, port=PORT, baudrate=BAUDRATE, on_time=ON_TIME, off_time=OFF_TIME):
+def run_pump_cycles(cycles=100, port=PORT, baudrate=BAUDRATE, on_time=ON_TIME, off_time=OFF_TIME, ctx=None):
+    """Run ON/OFF cycles until done, Ctrl+C or a stop request; return the number of completed cycles."""
+
+    ctx = ctx or ServiceContext.standalone()
 
     print(f"Connecting to Heltec on {port}...")
     print(f"Current date and time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -103,15 +117,14 @@ def run_pump_cycles(cycles=100, port=PORT, baudrate=BAUDRATE, on_time=ON_TIME, o
             print("==============================")
             print(f"Cycle {cycle}")
             print("PUMP ON")
+            ctx.report(activity=f"cycle {cycle}/{cycles}: pump ON")
 
             response = send_command(heltec, "ON")
 
             print("Heltec:", response)
 
-            countdown(
-                on_time,
-                "PUMP ON "
-            )
+            if countdown(on_time, "PUMP ON ", ctx):
+                break
 
             # --------------------
             # Pump OFF
@@ -119,15 +132,14 @@ def run_pump_cycles(cycles=100, port=PORT, baudrate=BAUDRATE, on_time=ON_TIME, o
 
             print()
             print("PUMP OFF")
+            ctx.report(activity=f"cycle {cycle}/{cycles}: pump OFF")
 
             response = send_command(heltec, "OFF")
 
             print("Heltec:", response)
 
-            countdown(
-                off_time,
-                "PUMP OFF"
-            )
+            if countdown(off_time, "PUMP OFF", ctx):
+                break
 
             cycle += 1
 
@@ -139,22 +151,28 @@ def run_pump_cycles(cycles=100, port=PORT, baudrate=BAUDRATE, on_time=ON_TIME, o
 
         print()
         print()
-        print("Stopping program...")
-        print("Turning pump OFF...")
-
-        try:
-
-            response = send_command(heltec, "OFF")
-            print("Heltec:", response)
-
-        except Exception:
-            pass
-
-        print("Pump OFF.")
-        print("Program stopped safely.")
 
     finally:
+
+        # Stopped early (Ctrl+C, stop request or an error): make sure the pump is OFF
+        if cycle <= cycles:
+
+            print("Stopping program...")
+            print("Turning pump OFF...")
+
+            try:
+
+                response = send_command(heltec, "OFF")
+                print("Heltec:", response)
+
+            except Exception:
+                pass
+
+            print("Pump OFF.")
+
         heltec.close()
+
+    return cycle - 1
 
 
 if __name__ == "__main__":
