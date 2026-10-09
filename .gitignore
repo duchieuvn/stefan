@@ -13,3 +13,4 @@ prototype_02/
 *.log
 *.sock
 *.pid
+data/**
