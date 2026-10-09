@@ -1,0 +1,564 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>RTI Service Pipeline</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+<style>
+  /* Three swim lanes (backend server, Postgres server, your computer), then a file-by-file reference. */
+  :root {
+    --bg: #EEF1EF;
+    --surface: #FAFBFA;
+    --surface-raised: #FFFFFF;
+    --ink: #1A2320;
+    --ink-dim: #5A6864;
+    --line: #D2DAD6;
+    --accent-backend: #A85A26;
+    --accent-backend-soft: rgba(168, 90, 38, 0.09);
+    --accent-pg: #1C7A72;
+    --accent-pg-soft: rgba(28, 122, 114, 0.09);
+    --accent-rti: #6A4996;
+    --accent-rti-soft: rgba(106, 73, 150, 0.09);
+    --font-display: 'IBM Plex Sans', system-ui, sans-serif;
+    --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #101614;
+      --surface: #171F1C;
+      --surface-raised: #1D2622;
+      --ink: #E9EDEA;
+      --ink-dim: #92A19B;
+      --line: #2A3733;
+      --accent-backend: #D98A4C;
+      --accent-backend-soft: rgba(217, 138, 76, 0.14);
+      --accent-pg: #3FB3A8;
+      --accent-pg-soft: rgba(63, 179, 168, 0.14);
+      --accent-rti: #A084C4;
+      --accent-rti-soft: rgba(160, 132, 196, 0.16);
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #101614;
+    --surface: #171F1C;
+    --surface-raised: #1D2622;
+    --ink: #E9EDEA;
+    --ink-dim: #92A19B;
+    --line: #2A3733;
+    --accent-backend: #D98A4C;
+    --accent-backend-soft: rgba(217, 138, 76, 0.14);
+    --accent-pg: #3FB3A8;
+    --accent-pg-soft: rgba(63, 179, 168, 0.14);
+    --accent-rti: #A084C4;
+    --accent-rti-soft: rgba(160, 132, 196, 0.16);
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-display);
+  }
+  body {
+    padding: 48px 28px 80px;
+    display: flex;
+    justify-content: center;
+  }
+  @media (max-width: 600px) { body { padding: 32px 16px 56px; } }
+  main { width: 100%; max-width: 1280px; min-width: 0; }
+
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent-pg);
+    margin: 0 0 10px;
+  }
+  h1 {
+    font-size: clamp(32px, 4.5vw, 46px);
+    font-weight: 700;
+    line-height: 1.08;
+    margin: 0 0 14px;
+    text-wrap: balance;
+    letter-spacing: -0.01em;
+  }
+  .lede {
+    font-size: 17px;
+    line-height: 1.6;
+    color: var(--ink-dim);
+    max-width: 66ch;
+    margin: 0 0 26px;
+  }
+  .lede strong { color: var(--ink); font-weight: 600; }
+
+  .machines {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 22px;
+    margin: 0 0 44px;
+    padding: 14px 18px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+  .machine {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 13.5px;
+    color: var(--ink-dim);
+  }
+  .machine .dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    display: inline-block;
+    flex: none;
+    transform: translateY(1px);
+  }
+  .machine b { color: var(--ink); font-weight: 600; }
+  .dot.backend { background: var(--accent-backend); }
+  .dot.pg { background: var(--accent-pg); }
+  .dot.rti { background: var(--accent-rti); }
+
+  figure { margin: 0 0 56px; }
+  .diagram-scroll {
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--surface);
+    padding: 8px;
+  }
+  .diagram-scroll svg {
+    display: block;
+    width: 100%;
+    min-width: 1120px;
+    height: auto;
+  }
+  figcaption {
+    margin-top: 14px;
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--ink-dim);
+    max-width: 78ch;
+  }
+  figcaption code { font-family: var(--font-mono); }
+
+  /* SVG text styles */
+  .lane-title { font-family: var(--font-display); font-weight: 700; font-size: 13px; letter-spacing: 0.09em; }
+  .lane-sub { font-family: var(--font-mono); font-size: 11px; fill: var(--ink-dim); }
+  .box { fill: var(--surface-raised); stroke-width: 1.4; }
+  .box.backend { stroke: var(--accent-backend); }
+  .box.pg { stroke: var(--accent-pg); }
+  .box.rti { stroke: var(--accent-rti); }
+  .box-title { font-family: var(--font-mono); font-weight: 600; font-size: 13px; }
+  .box-title.sm { font-size: 12.5px; }
+  .box-title.backend { fill: var(--accent-backend); }
+  .box-title.pg { fill: var(--accent-pg); }
+  .box-title.rti { fill: var(--accent-rti); }
+  .box-sub { font-family: var(--font-display); font-size: 11px; fill: var(--ink-dim); }
+  .edge-label { font-family: var(--font-display); font-size: 10.5px; fill: var(--ink-dim); }
+  .flow { fill: none; stroke: var(--ink-dim); stroke-width: 1.5; stroke-linejoin: round; }
+  .flow.live { stroke-dasharray: 5 4; }
+  .flow.control { stroke-dasharray: 2 3; }
+  .group { fill: none; stroke: var(--ink-dim); stroke-width: 1; stroke-dasharray: 2 4; }
+
+  h2.section-title {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+    margin: 0 0 20px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 22px;
+    margin-bottom: 50px;
+    align-items: start;
+  }
+  @media (max-width: 920px) {
+    .cards { grid-template-columns: minmax(0, 1fr); }
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 22px 22px 20px;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .card-head {
+    padding-bottom: 14px;
+    margin-bottom: 14px;
+    border-bottom: 1px dashed var(--line);
+  }
+  .card-head .tag {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 5px;
+    margin-bottom: 10px;
+  }
+  .card.backend .tag { color: var(--accent-backend); background: var(--accent-backend-soft); }
+  .card.pg .tag { color: var(--accent-pg); background: var(--accent-pg-soft); }
+  .card.rti .tag { color: var(--accent-rti); background: var(--accent-rti-soft); }
+
+  .card-head h3 {
+    font-size: 19px;
+    margin: 0 0 4px;
+    font-weight: 600;
+  }
+  .card-head p {
+    margin: 0;
+    font-size: 13px;
+    color: var(--ink-dim);
+    font-family: var(--font-mono);
+  }
+
+  .filelist { list-style: none; margin: 0; padding: 0; }
+  .filelist li {
+    padding: 10px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .filelist li:last-child { border-bottom: none; }
+  .filelist code {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 3px;
+    overflow-wrap: anywhere;
+  }
+  .card.backend .filelist code { color: var(--accent-backend); }
+  .card.pg .filelist code { color: var(--accent-pg); }
+  .card.rti .filelist code { color: var(--accent-rti); }
+
+  .filelist span {
+    display: block;
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--ink-dim);
+  }
+  .filelist span code {
+    display: inline;
+    font-size: 12px;
+    font-weight: 400;
+    margin: 0;
+    color: var(--ink) !important;
+  }
+  .filelist li.aside > code { opacity: 0.7; }
+  .filelist li.aside > span { font-style: italic; }
+
+  footer {
+    border-top: 1px solid var(--line);
+    padding-top: 22px;
+    font-size: 13px;
+    color: var(--ink-dim);
+    line-height: 1.6;
+  }
+  footer code {
+    font-family: var(--font-mono);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--ink);
+  }
+</style>
+
+<main>
+  <p class="eyebrow">System architecture</p>
+  <h1>RTI Service Pipeline</h1>
+  <p class="lede">
+    How a sensor reading travels from the LoRa nodes to the map on screen, now that every
+    backend job runs under one <strong>manager daemon</strong>. Three machines each own one
+    stage. This page follows the data, file by file.
+  </p>
+
+  <div class="machines">
+    <span class="machine"><span class="dot backend"></span> <b>Backend server</b> · backend/ · manager daemon + 4 services</span>
+    <span class="machine"><span class="dot pg"></span> <b>Postgres server</b> · reached over Tailscale</span>
+    <span class="machine"><span class="dot rti"></span> <b>Your computer</b> · app/</span>
+  </div>
+
+  <figure>
+    <div class="diagram-scroll">
+      <svg viewBox="0 0 1600 760" role="img" aria-label="On the backend server, manage_services.py talks to the manager daemon over a Unix socket, and the daemon supervises four services. The sensor service polls 8 LoRa nodes over Modbus RTU and writes every round into sensor_data.db. The sync service reads sensor_data.db read-only every 15 minutes and batch-inserts new rows into PostgreSQL on the Postgres server over Tailscale. The reduce service copies every 5th round into reduced_data.db at start-up, 06:00 and 18:00. The pump service drives the Heltec pump controller over serial. On your computer, database.py pulls reduced_data.db by SFTP when the local copy is older than 8 hours, or queries PostgreSQL live. precompute_sequences.py solves the RTI sequences into a joblib cache, which main.py loads and displays; main.py starts the precompute when the cache is stale.">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 Z" style="fill:var(--ink-dim)"></path>
+          </marker>
+        </defs>
+
+        <!-- lane backgrounds -->
+        <rect x="10" y="15" width="640" height="690" rx="12" style="fill:var(--accent-backend-soft)"></rect>
+        <rect x="660" y="15" width="350" height="690" rx="12" style="fill:var(--accent-pg-soft)"></rect>
+        <rect x="1020" y="15" width="570" height="690" rx="12" style="fill:var(--accent-rti-soft)"></rect>
+
+        <!-- lane headers -->
+        <text x="330" y="42" text-anchor="middle" class="lane-title" style="fill:var(--accent-backend)">BACKEND SERVER</text>
+        <text x="330" y="58" text-anchor="middle" class="lane-sub">backend/</text>
+
+        <text x="835" y="42" text-anchor="middle" class="lane-title" style="fill:var(--accent-pg)">POSTGRES SERVER</text>
+        <text x="835" y="58" text-anchor="middle" class="lane-sub">Tailscale</text>
+
+        <text x="1305" y="42" text-anchor="middle" class="lane-title" style="fill:var(--accent-rti)">YOUR COMPUTER</text>
+        <text x="1305" y="58" text-anchor="middle" class="lane-sub">app/</text>
+
+        <!-- ===== BACKEND SERVER ===== -->
+        <!-- control row -->
+        <rect x="40" y="75" width="250" height="60" rx="8" class="box backend"></rect>
+        <text x="165" y="99" text-anchor="middle" class="box-title backend">manage_services.py</text>
+        <text x="165" y="117" text-anchor="middle" class="box-sub">CLI · terminal UI · cron start-all</text>
+
+        <rect x="370" y="75" width="230" height="60" rx="8" class="box backend"></rect>
+        <text x="485" y="99" text-anchor="middle" class="box-title backend">Manager daemon</text>
+        <text x="485" y="117" text-anchor="middle" class="box-sub">starts, stops, restarts crashes</text>
+
+        <line x1="290" y1="105" x2="370" y2="105" class="flow control" marker-end="url(#arrow)"></line>
+        <text x="330" y="97" text-anchor="middle" class="edge-label">JSON · .sock</text>
+
+        <line x1="485" y1="135" x2="485" y2="165" class="flow control" marker-end="url(#arrow)"></line>
+        <text x="495" y="155" class="edge-label">supervises</text>
+
+        <!-- supervised services group -->
+        <rect x="355" y="165" width="260" height="510" rx="10" class="group"></rect>
+        <text x="485" y="665" text-anchor="middle" class="edge-label">one child process per service</text>
+
+        <!-- row 190: nodes <-> sensor -->
+        <rect x="40" y="190" width="250" height="60" rx="8" class="box backend"></rect>
+        <text x="165" y="214" text-anchor="middle" class="box-title backend">LoRa sensor nodes</text>
+        <text x="165" y="232" text-anchor="middle" class="box-sub">8 nodes · RSSI, SNR · BME on 5–8</text>
+
+        <rect x="370" y="190" width="230" height="60" rx="8" class="box backend"></rect>
+        <text x="485" y="214" text-anchor="middle" class="box-title sm backend">main_senor_data.py</text>
+        <text x="485" y="232" text-anchor="middle" class="box-sub">sensor · one round every 60 s</text>
+
+        <line x1="290" y1="220" x2="370" y2="220" class="flow" marker-start="url(#arrow)" marker-end="url(#arrow)"></line>
+        <text x="330" y="212" text-anchor="middle" class="edge-label">Modbus RTU</text>
+
+        <polyline points="485,250 485,285 165,285 165,320" class="flow" marker-end="url(#arrow)"></polyline>
+        <text x="325" y="278" text-anchor="middle" class="edge-label">INSERT · commit per round</text>
+
+        <!-- row 320: sensor_data.db -> sync -->
+        <rect x="40" y="320" width="250" height="60" rx="8" class="box backend"></rect>
+        <text x="165" y="344" text-anchor="middle" class="box-title backend">sensor_data.db</text>
+        <text x="165" y="362" text-anchor="middle" class="box-sub">SQLite · WAL · full-resolution log</text>
+
+        <rect x="370" y="320" width="230" height="60" rx="8" class="box backend"></rect>
+        <text x="485" y="344" text-anchor="middle" class="box-title sm backend">sync_scheduled_postgres.py</text>
+        <text x="485" y="362" text-anchor="middle" class="box-sub">sync · every 15 min</text>
+
+        <line x1="290" y1="350" x2="370" y2="350" class="flow" marker-end="url(#arrow)"></line>
+        <text x="330" y="342" text-anchor="middle" class="edge-label">read-only</text>
+
+        <polyline points="165,380 165,415 485,415 485,450" class="flow" marker-end="url(#arrow)"></polyline>
+        <text x="325" y="408" text-anchor="middle" class="edge-label">reads at 06:00 · 18:00</text>
+
+        <!-- row 450: reduce -> reduced_data.db -->
+        <rect x="40" y="450" width="250" height="60" rx="8" class="box backend"></rect>
+        <text x="165" y="474" text-anchor="middle" class="box-title backend">reduced_data.db</text>
+        <text x="165" y="492" text-anchor="middle" class="box-sub">SQLite · reduced copy</text>
+
+        <rect x="370" y="450" width="230" height="60" rx="8" class="box backend"></rect>
+        <text x="485" y="474" text-anchor="middle" class="box-title sm backend">scheduled_reduce_database.py</text>
+        <text x="485" y="492" text-anchor="middle" class="box-sub">reduce · keeps every 5th round</text>
+
+        <line x1="370" y1="480" x2="290" y2="480" class="flow" marker-end="url(#arrow)"></line>
+        <text x="330" y="472" text-anchor="middle" class="edge-label">writes</text>
+
+        <!-- row 580: pump -> Heltec -->
+        <rect x="40" y="580" width="250" height="60" rx="8" class="box backend"></rect>
+        <text x="165" y="604" text-anchor="middle" class="box-title backend">Heltec controller</text>
+        <text x="165" y="622" text-anchor="middle" class="box-sub">water pump</text>
+
+        <rect x="370" y="580" width="230" height="60" rx="8" class="box backend"></rect>
+        <text x="485" y="604" text-anchor="middle" class="box-title sm backend">schedule_pump.py</text>
+        <text x="485" y="622" text-anchor="middle" class="box-sub">pump · 09:50 &amp; 15:30</text>
+
+        <line x1="370" y1="610" x2="290" y2="610" class="flow" marker-end="url(#arrow)"></line>
+        <text x="330" y="602" text-anchor="middle" class="edge-label">/dev/ttyUSB1</text>
+
+        <!-- ===== POSTGRES SERVER ===== -->
+        <rect x="705" y="320" width="260" height="60" rx="8" class="box pg"></rect>
+        <text x="835" y="344" text-anchor="middle" class="box-title pg">PostgreSQL</text>
+        <text x="835" y="362" text-anchor="middle" class="box-sub">measurement · rounds</text>
+        <text x="835" y="404" text-anchor="middle" class="edge-label">batches of 1000 · ON CONFLICT DO NOTHING</text>
+        <text x="835" y="419" text-anchor="middle" class="edge-label">resumes from MAX(round_id), MAX(id)</text>
+
+        <!-- backend -> postgres -->
+        <line x1="600" y1="350" x2="705" y2="350" class="flow" marker-end="url(#arrow)"></line>
+        <text x="660" y="342" text-anchor="middle" class="edge-label">Tailscale</text>
+
+        <!-- backend -> your computer (SFTP) -->
+        <polyline points="165,510 165,545 1040,545" class="flow" marker-end="url(#arrow)"></polyline>
+        <text x="835" y="537" text-anchor="middle" class="edge-label">SFTP pull · when the local copy is older than 8 h</text>
+
+        <!-- postgres -> your computer (live query) -->
+        <line x1="965" y1="350" x2="1040" y2="350" class="flow live" marker-end="url(#arrow)"></line>
+        <text x="1002" y="342" text-anchor="middle" class="edge-label">live query</text>
+
+        <!-- ===== YOUR COMPUTER ===== -->
+        <rect x="1040" y="320" width="250" height="60" rx="8" class="box rti"></rect>
+        <text x="1165" y="344" text-anchor="middle" class="box-title rti">database.py</text>
+        <text x="1165" y="362" text-anchor="middle" class="box-sub">sqlite | postgres | pg-tailscale</text>
+
+        <rect x="1320" y="320" width="250" height="60" rx="8" class="box rti"></rect>
+        <text x="1445" y="344" text-anchor="middle" class="box-title rti">precompute_sequences.py</text>
+        <text x="1445" y="362" text-anchor="middle" class="box-sub">RTI solve → sequence_cache/*.joblib</text>
+
+        <rect x="1040" y="515" width="250" height="60" rx="8" class="box rti"></rect>
+        <text x="1165" y="539" text-anchor="middle" class="box-title rti">reduced_data_&lt;ts&gt;.db</text>
+        <text x="1165" y="557" text-anchor="middle" class="box-sub">local SQLite copy</text>
+
+        <rect x="1320" y="515" width="250" height="60" rx="8" class="box rti"></rect>
+        <text x="1445" y="539" text-anchor="middle" class="box-title rti">main.py</text>
+        <text x="1445" y="557" text-anchor="middle" class="box-sub">Tk viewer · sliders + Matplotlib</text>
+
+        <line x1="1165" y1="515" x2="1165" y2="380" class="flow" marker-end="url(#arrow)"></line>
+        <text x="1175" y="451" class="edge-label">newest copy</text>
+
+        <line x1="1290" y1="350" x2="1320" y2="350" class="flow" marker-end="url(#arrow)"></line>
+
+        <line x1="1405" y1="380" x2="1405" y2="515" class="flow" marker-end="url(#arrow)"></line>
+        <text x="1397" y="451" text-anchor="end" class="edge-label">joblib.load</text>
+
+        <line x1="1490" y1="515" x2="1490" y2="380" class="flow control" marker-end="url(#arrow)"></line>
+        <text x="1498" y="444" class="edge-label">runs it if</text>
+        <text x="1498" y="458" class="edge-label">cache is stale</text>
+
+        <!-- legend -->
+        <line x1="40" y1="735" x2="72" y2="735" class="flow"></line>
+        <text x="80" y="739" class="box-sub">data movement</text>
+
+        <line x1="220" y1="735" x2="252" y2="735" class="flow live"></line>
+        <text x="260" y="739" class="box-sub">on-demand live query</text>
+
+        <line x1="430" y1="735" x2="462" y2="735" class="flow control"></line>
+        <text x="470" y="739" class="box-sub">process control</text>
+      </svg>
+    </div>
+    <figcaption>
+      Every round starts on the backend server, where the manager daemon keeps four services
+      running. Full-resolution rows go to Postgres every 15 minutes. A reduced SQLite copy is made
+      twice a day, and your computer pulls it over SFTP when its own copy is stale.
+      <code>database.py</code> reads that copy by default, or queries Postgres live.
+    </figcaption>
+  </figure>
+
+  <h2 class="section-title">File-by-file reference</h2>
+  <div class="cards">
+    <div class="card backend">
+      <div class="card-head">
+        <span class="tag">Backend server</span>
+        <h3>Collect &amp; supervise</h3>
+        <p>backend/</p>
+      </div>
+      <ul class="filelist">
+        <li>
+          <code>manage_services.py</code>
+          <span>Command line and terminal UI: status, start, stop, run-now, shutdown. Starts the daemon in the background if it isn't running, and talks to it with one JSON line over <code>manage_services.sock</code>.</span>
+        </li>
+        <li>
+          <code>manage_services.py daemon</code>
+          <span>Runs each service in its own child process, 2 s apart. Stops with Ctrl+C, then SIGTERM after 15 s, then SIGKILL. Restarts crashes after 5 s, doubling up to 5 min. Won't start a copy already running outside it.</span>
+        </li>
+        <li>
+          <code>service_runtime.py</code>
+          <span>The context each service gets: <code>stopping()</code>, <code>wait()</code>, <code>idle()</code> for run-now, and <code>report()</code> for the status shown in the UI.</span>
+        </li>
+        <li>
+          <code>master/main_senor_data.py</code>
+          <span>Each node sends in turn and the others are polled for the packet. Writes one <code>measurement</code> row per link and one <code>rounds</code> row per round into <code>sensor_data.db</code>. Reads LoRa settings from node 1 instead of rewriting them.</span>
+        </li>
+        <li>
+          <code>postgres_schedule/sync_scheduled_postgres.py</code>
+          <span>Opens <code>sensor_data.db</code> read-only and copies rows newer than Postgres's highest IDs. The manager runs it every 900 s; run alone it defaults to 2 h.</span>
+        </li>
+        <li>
+          <code>reduce_sqlite/scheduled_reduce_database.py</code>
+          <span>At start-up and at 06:00 and 18:00, rebuilds <code>reduced_data.db</code> with rounds whose ID is divisible by 5, then runs VACUUM.</span>
+        </li>
+        <li class="aside">
+          <code>water_pumping/schedule_pump.py</code>
+          <span>Runs 100 pump cycles at 09:50 and 15:30. Runs under the same manager, but touches no database.</span>
+        </li>
+      </ul>
+    </div>
+
+    <div class="card pg">
+      <div class="card-head">
+        <span class="tag">Postgres server</span>
+        <h3>Central copy</h3>
+        <p>Tailscale</p>
+      </div>
+      <ul class="filelist">
+        <li>
+          <code>PostgreSQL</code>
+          <span>Holds the full-resolution <code>measurement</code> and <code>rounds</code> tables. The sync creates them if they're missing.</span>
+        </li>
+        <li>
+          <code>postgres_schedule/.env</code>
+          <span>Named profiles: <code>MAIN_SQLITE_PATH</code> with <code>MAIN_TAILSCALE_DSN</code> by default, or a <code>local</code> connection and a <code>reduced</code> source.</span>
+        </li>
+        <li>
+          <code>db_local/local_db_build.sh</code>
+          <span>Builds a local <code>sensor_data</code> Postgres database from a dump, for testing.</span>
+        </li>
+      </ul>
+    </div>
+
+    <div class="card rti">
+      <div class="card-head">
+        <span class="tag">Your computer</span>
+        <h3>Compute &amp; visualize</h3>
+        <p>app/</p>
+      </div>
+      <ul class="filelist">
+        <li>
+          <code>database.py</code>
+          <span>Pulls the backend's <code>reduced_data.db</code> by SFTP into <code>reduced_data_&lt;timestamp&gt;.db</code> when the newest local copy is older than 8 h. Also opens Postgres through an SSH tunnel or directly over Tailscale.</span>
+        </li>
+        <li>
+          <code>precompute_sequences.py</code>
+          <span>Runs the RTI solver for each reference day and saves <code>sequence_cache/&lt;date&gt;.joblib</code>, removing files for days that no longer exist.</span>
+        </li>
+        <li>
+          <code>rti_temporal_core.py</code>
+          <span>The spatial + temporal regularized solver and the cache helpers. Pure computation, no UI.</span>
+        </li>
+        <li>
+          <code>rti_temporal_visualization.py</code>
+          <span>Draws the Matplotlib figure from the solver's output.</span>
+        </li>
+        <li>
+          <code>main.py</code>
+          <span>Tk viewer. If the newest cache file isn't from today, it runs the precompute behind a progress window first, then loads cached sequences as you move the sliders.</span>
+        </li>
+      </ul>
+    </div>
+  </div>
+
+  <footer>
+    Since the RTI Pipeline page: the sync now copies the full-resolution
+    <code>sensor_data.db</code> every 15 minutes, where before it copied <code>backup.db</code>
+    every 2 hours. The reduced file is now <code>reduced_data.db</code>, and the app's SFTP pull
+    lives in <code>database.py</code>. All four backend jobs run under the manager daemon instead
+    of separate <code>nohup</code> processes.
+  </footer>
+</main>
+
+</body></html>

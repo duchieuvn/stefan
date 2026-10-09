@@ -15,13 +15,16 @@ from __future__ import annotations
 import argparse
 import os
 import sqlite3
-import time
+import sys
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import psycopg2  # currently only works with psycopg2 2.9.10
 from dotenv import load_dotenv
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # backend/, for service_runtime
+from service_runtime import ServiceContext
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(ENV_PATH)
@@ -197,14 +200,14 @@ def sync_batch(src: sqlite3.Connection, pg: psycopg2.extensions.connection) -> P
     return postgres_position(pg)
 
 
-def catch_up(sqlite_path: Path, dsn: str, target: Position) -> None:
-    """Run batches until PostgreSQL reaches `target` (a snapshot of the source)."""
+def catch_up(sqlite_path: Path, dsn: str, target: Position, ctx: ServiceContext) -> None:
+    """Run batches until PostgreSQL reaches `target` (a snapshot of the source) or ctx asks to stop."""
     with closing(connect_sqlite(sqlite_path)) as src, closing(connect_postgres(dsn)) as pg:
         create_postgres_schema(pg)
         position = postgres_position(pg)
         log(f"Progress: {format_position(position)}; target: {format_position(target)}")
 
-        while position[0] < target[0] or position[1] < target[1]:
+        while (position[0] < target[0] or position[1] < target[1]) and not ctx.stopping():
             previous = position
             position = sync_batch(src, pg)
             log(f"Progress: {format_position(position)}; target: {format_position(target)}")
@@ -212,7 +215,7 @@ def catch_up(sqlite_path: Path, dsn: str, target: Position) -> None:
                 raise RuntimeError(f"Sync made no progress before reaching {format_position(target)}")
 
 
-def run_scheduled_sync(sqlite_path: Path, dsn: str) -> bool:
+def run_scheduled_sync(sqlite_path: Path, dsn: str, ctx: ServiceContext) -> bool:
     """One scheduled run: snapshot the source, then catch up with exponential-backoff retries."""
     target: Position | None = None
 
@@ -222,7 +225,10 @@ def run_scheduled_sync(sqlite_path: Path, dsn: str) -> bool:
                 with closing(connect_sqlite(sqlite_path)) as src:
                     target = sqlite_position(src)
                 log(f"Starting scheduled sync; target {format_position(target)}")
-            catch_up(sqlite_path, dsn, target)
+            catch_up(sqlite_path, dsn, target, ctx)
+            if ctx.stopping():
+                log(f"Scheduled sync stopped before reaching {format_position(target)}")
+                return False
             log(f"Scheduled sync complete at {format_position(target)}")
             return True
         except Exception as error:
@@ -231,8 +237,39 @@ def run_scheduled_sync(sqlite_path: Path, dsn: str) -> bool:
                 return False
             delay = INITIAL_RETRY_DELAY_SECONDS * 2**attempt
             log(f"ERROR: Sync attempt {attempt + 1} failed: {error}; retrying in {delay} seconds")
-            time.sleep(delay)
+            if ctx.wait(delay):
+                return False
     return False
+
+
+def profile(source: str, connection: str) -> tuple[Path, str]:
+    """SQLite path and PostgreSQL DSN of a source/connection profile from .env."""
+    sqlite_path = Path(require_env(f"{source.upper()}_SQLITE_PATH")).expanduser()
+    dsn = require_env(f"{source.upper()}_{connection.upper()}_DSN")
+    log(f"Sync configuration: source={source}, connection={connection}, sqlite_path={sqlite_path}")
+    return sqlite_path, dsn
+
+
+def run(ctx: ServiceContext, source: str = "main", connection: str = "tailscale",
+        interval_seconds: int = DEFAULT_INTERVAL_SECONDS) -> None:
+    """Sync every `interval_seconds` (and on "run now") until ctx asks to stop."""
+    sqlite_path, dsn = profile(source, connection)
+    log(f"Sync scheduler started (interval={interval_seconds} seconds)")
+
+    while not ctx.stopping():
+        started = datetime.now()
+        ctx.report(activity="syncing")
+        ok = run_scheduled_sync(sqlite_path, dsn, ctx)
+        if ctx.stopping():
+            ctx.report(activity="stopping", last_run=started, last_result="stopped")
+            break
+        ctx.report(activity="idle", last_run=started, last_result="ok" if ok else "failed, see log",
+                   next_run=datetime.now() + timedelta(seconds=interval_seconds))
+        log(f"Next scheduled sync will start in {interval_seconds} seconds")
+        if ctx.idle(interval_seconds):
+            log("Run now requested")
+
+    log("Sync scheduler stopped")
 
 
 # --- CLI ---
@@ -252,27 +289,18 @@ def main() -> None:
     if args.interval_seconds <= 0:
         parser.error("--interval-seconds must be greater than 0")
 
-    sqlite_path = Path(require_env(f"{args.source.upper()}_SQLITE_PATH")).expanduser()
-    dsn = require_env(f"{args.source.upper()}_{args.connection.upper()}_DSN")
-    log(f"Sync configuration: source={args.source}, connection={args.connection}, sqlite_path={sqlite_path}")
-
-    connect_postgres(dsn).close()
-    log("PostgreSQL connection successful")
-    if args.check:
+    if args.check or args.once:
+        sqlite_path, dsn = profile(args.source, args.connection)
+        connect_postgres(dsn).close()
+        log("PostgreSQL connection successful")
+        if args.once:
+            with closing(connect_sqlite(sqlite_path)) as src, closing(connect_postgres(dsn)) as pg:
+                create_postgres_schema(pg)
+                log(f"Synced to {format_position(sync_batch(src, pg))}")
         return
 
-    if args.once:
-        with closing(connect_sqlite(sqlite_path)) as src, closing(connect_postgres(dsn)) as pg:
-            create_postgres_schema(pg)
-            log(f"Synced to {format_position(sync_batch(src, pg))}")
-        return
-
-    log(f"Sync scheduler started (interval={args.interval_seconds} seconds)")
     try:
-        while True:
-            run_scheduled_sync(sqlite_path, dsn)
-            log(f"Next scheduled sync will start in {args.interval_seconds} seconds")
-            time.sleep(args.interval_seconds)
+        run(ServiceContext.standalone(), args.source, args.connection, args.interval_seconds)
     except KeyboardInterrupt:
         log("Sync scheduler stopped")
 

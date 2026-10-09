@@ -11,3 +11,6 @@ prototype_02/
 *.joblib
 *.dump
 *.log
+*.sock
+*.pid
+data/**
