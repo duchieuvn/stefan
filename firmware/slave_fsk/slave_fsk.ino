@@ -1,3 +1,5 @@
+#define RADIO_USE_FSK 1   // 0 = LoRa, 1 = FSK
+
 #include <Arduino.h>
 #include <RadioLib.h>
 
@@ -14,7 +16,7 @@ SSD1306Wire oled(OLED_I2C_ADDR, OLED_SDA_PIN, OLED_SCL_PIN, OLED_GEOMETRY, I2C_O
 SX1262 radio = new Module(LORA_PIN_NSS, LORA_PIN_DIO1, LORA_PIN_RST, LORA_PIN_BUSY);
 
 // SLAVE_ID bitte EINMAL global 
-const uint8_t SLAVE_ID = 4;
+const uint8_t SLAVE_ID = 12;
 
 
 String deviceId;

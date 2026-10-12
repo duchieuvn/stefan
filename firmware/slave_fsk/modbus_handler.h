@@ -6,16 +6,14 @@
 extern SX1262 radio;
 extern String deviceId;  // wird im Setup gesetzt (getMacFull())
 
-// BME-Messfunktion (kommt aus bme280_handler.h)
-void measureBme280();
-
 // ------------------------------
 // 🆔 Eigene Gerätekennung
 // ------------------------------
 extern const uint8_t SLAVE_ID;
 
-#define TXD1 7 
-#define RXD1 6 
+// Change these pins according to your TTL ebay modbus
+#define TXD1 6
+#define RXD1 7
 
 // ------------------------------
 // 📦 Modbus-Register-Belegung
@@ -125,7 +123,8 @@ void updateLoRaInfo(const String& idStr, uint32_t timestamp, float rssi, float s
   mb.Hreg(TIME_REG_BASE + 1, (uint16_t)(timestamp & 0xFFFF));
 
   mb.Hreg(RSSI_REGISTER, (int16_t)(rssi * 10.0));
-  mb.Hreg(SNR_REGISTER,  (int16_t)(snr  * 10.0));
+  // FSK hat kein SNR (NAN) → 0 ins Register
+  mb.Hreg(SNR_REGISTER,  isnan(snr) ? 0 : (int16_t)(snr * 10.0));
 
   Serial.println("--- Modbus Update ---");
   Serial.printf("Empfangene ID: %u\n", receivedId);
@@ -138,6 +137,16 @@ void updateLoRaInfo(const String& idStr, uint32_t timestamp, float rssi, float s
 void applyLoRaSettings() {
   float freqMHz = mb.Hreg(LORA_FREQ_REGISTER) / 10.0;
   int power = mb.Hreg(LORA_POWER_REGISTER);
+
+#if RADIO_USE_FSK
+  // Im FSK-Modus gibt es kein SF/BW/CR → nur Frequenz und Leistung übernehmen
+  Serial.println("⚙️  Übernehme FSK-Konfiguration (SF/BW/CR-Register werden ignoriert):");
+  Serial.printf("Frequenz      : %.1f MHz\n", freqMHz);
+  Serial.printf("Sendeleistung : %d dBm\n", power);
+
+  radio.setFrequency(freqMHz);
+  radio.setOutputPower(power);
+#else
   int sf = mb.Hreg(LORA_SF_REGISTER);
   float bw = mb.Hreg(LORA_BW_REGISTER);  // normal in kHz
   int cr = mb.Hreg(LORA_CR_REGISTER);
@@ -158,6 +167,7 @@ void applyLoRaSettings() {
   radio.setSpreadingFactor(sf);
   radio.setBandwidth(bw);
   radio.setCodingRate(cr);
+#endif
 }
 
 void triggerMeasurement() {
@@ -222,11 +232,6 @@ void modbusTask() {
       case 10:
         Serial.println("📡 Befehl: LoRa-Broadcast");
         triggerMeasurement();
-        break;
-
-      case 11:
-        Serial.println("🌡️ Befehl: BME280-Messung ausführen");
-        measureBme280();
         break;
 
       case 99:

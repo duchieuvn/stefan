@@ -12,76 +12,7 @@ from typing import Optional, Dict, Any, List, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # backend/, for service_runtime
 from service_runtime import ServiceContext
 
-
-# =========================
-# KONFIG (anpassen!)
-# =========================
-# Node bus is on the FTDI adapter; by-id path survives ttyUSB renumbering
-PORT = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A5069RR4-if00-port0"
-BAUDRATE = 9600
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"   # backend/data (sibling of master/)
-DB_PATH = str(DATA_DIR / "sensor_data.db")   # bei altem Schema lieber neue Datei nehmen
-
-NODES = [1, 2, 3, 4, 5, 6, 7, 8]
-
-# Register map
-CMD_REGISTER = 200
-CMD_TX = 10
-CMD_BME = 11
-CMD_LED_ON = 1
-CMD_LED_OFF = 2
-
-# 300/301: 32-bit TX-Timestamp (ms), wird vom Sender mitgesendet
-# und vom Empfänger 1:1 im RX-Block zurückgeliefert
-TX_TIMESTAMP_BASE_REG = 300
-
-RX_BLOCK_ADDR = 100
-RX_BLOCK_COUNT = 16
-
-BME_TEMP_REG = 120
-BME_NODES = {5, 6, 7, 8}
-
-# Payload
-PAYLOAD_LEN_REG = 320
-PAYLOAD_DATA_BASE = 321
-PAYLOAD_MAX_BYTES = 64
-PAYLOAD_TEXT = "The quick brown fox jumps over the lazy dog"
-
-# Timing
-RX_TIMEOUT_S = 10.0
-RX_POLL_S = 0.05
-RX_STABLE_READS = 2
-RX_STABLE_GAP_S = 0.03
-
-BME_TIMEOUT_S = 3.0
-BME_POLL_S = 0.2
-REQUIRE_BME = False
-
-MEASURE_INTERVAL_S = 60.0
-
-# SQLite robustness
-SQLITE_CONNECT_TIMEOUT_S = 30.0
-SQLITE_BUSY_TIMEOUT_MS = 15000
-COMMIT_RETRIES = 12
-COMMIT_BACKOFF_START_S = 0.15
-COMMIT_BACKOFF_MAX_S = 2.0
-
-# LoRa config registers
-# 400..404 = freq_x10, power, sf, bw, cr
-LORA_BASE = 400
-LORA_APPLY = 410
-
-# Defaults
-DEFAULT_FREQ_MHZ = 433.0
-DEFAULT_POWER = 22
-DEFAULT_SF = 12
-DEFAULT_BW = 125
-DEFAULT_CR = 8
-
-# Terminal logging
-VERBOSE = True
-PRINT_LINK_LINE = True
-
+from config import *
 
 # =========================
 # SQLite helpers
@@ -531,71 +462,6 @@ def rx_block_stable(client, slave_id: int, stable_reads: int = RX_STABLE_READS) 
 
     return last
 
-
-def read_bme_block(client, slave_id: int) -> Optional[Dict[str, Any]]:
-    try:
-        res = _call(client.read_holding_registers, address=BME_TEMP_REG, count=3, device_id=slave_id)
-        if res is None or res.isError():
-            return None
-
-        regs = res.registers
-        temp = to_int16(regs[0]) / 100.0
-        hum = regs[1] / 100.0
-        press = regs[2] / 10.0
-
-        return {"bme_temp": temp, "bme_hum": hum, "bme_press": press}
-    except Exception:
-        return None
-
-
-def wait_for_bme_ready(client, rid: int) -> Tuple[Optional[Dict[str, Any]], float]:
-    t0 = time.perf_counter()
-    deadline = time.time() + BME_TIMEOUT_S
-    last = None
-
-    while time.time() < deadline:
-        bme = read_bme_block(client, rid)
-        last = bme
-
-        if bme is None:
-            time.sleep(BME_POLL_S)
-            continue
-
-        if not REQUIRE_BME:
-            return bme, (time.perf_counter() - t0) * 1000.0
-
-        if not (bme["bme_temp"] == 0.0 and bme["bme_hum"] == 0.0 and bme["bme_press"] == 0.0):
-            return bme, (time.perf_counter() - t0) * 1000.0
-
-        time.sleep(BME_POLL_S)
-
-    return last, (time.perf_counter() - t0) * 1000.0
-
-
-def collect_round_bme(client) -> Dict[int, Dict[str, Any]]:
-    """
-    Liest BME nur 1x pro Runde für Knoten 5..8.
-    Die Werte werden später nur bei den Zeilen mit passendem receiver_id eingetragen.
-    """
-    out: Dict[int, Dict[str, Any]] = {}
-
-    for sid in BME_NODES:
-        try:
-            send_bme_cmd(client, sid)
-            bme, wait_ms = wait_for_bme_ready(client, sid)
-            if bme is not None:
-                out[sid] = {
-                    "bme_temp": bme.get("bme_temp"),
-                    "bme_hum": bme.get("bme_hum"),
-                    "bme_press": bme.get("bme_press"),
-                    "bme_wait_ms": wait_ms,
-                }
-        except Exception as e:
-            log(f"[Node {sid}] BME round-read failed: {e}")
-
-    return out
-
-
 def write_payload(client, sid: int, text: str) -> Tuple[int, int]:
     plen, regs = pack_ascii_to_regs(text)
 
@@ -623,13 +489,6 @@ def send_tx_cmd(client, sid: int) -> None:
     w = _call(client.write_register, CMD_REGISTER, CMD_TX, device_id=sid)
     if w is None or w.isError():
         raise RuntimeError(f"[Node {sid}] TX command failed")
-
-
-def send_bme_cmd(client, sid: int) -> None:
-    w = _call(client.write_register, CMD_REGISTER, CMD_BME, device_id=sid)
-    if w is None or w.isError():
-        raise RuntimeError(f"[Node {sid}] BME command failed")
-
 
 def send_led_cmd(client, sid: int, on: bool) -> None:
     cmd = CMD_LED_ON if on else CMD_LED_OFF
@@ -669,9 +528,6 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
             payload_len = plen
         except Exception as e:
             log(f"[Node {sid}] payload write failed: {e}")
-
-    # BME nur 1x pro Runde lesen
-    round_bme = collect_round_bme(client)
 
     # Sicherheitshalber alle LEDs aus
     for sid in NODES:
@@ -758,20 +614,11 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
             else:
                 timeouts += 1
 
-            # BME nur aus dem Rundencache holen, und nur passend zum receiver_id
-            bme_entry = round_bme.get(receiver_id)
-            bme_wait_ms = bme_entry.get("bme_wait_ms") if bme_entry else None
-            bme_temp = bme_entry.get("bme_temp") if bme_entry else None
-            bme_hum = bme_entry.get("bme_hum") if bme_entry else None
-            bme_press = bme_entry.get("bme_press") if bme_entry else None
+            
 
             if VERBOSE and PRINT_LINK_LINE:
                 rssi_txt = f"{rx.get('rssi'):.1f}" if (rx is not None and rx.get("rssi") is not None) else "None"
                 snr_txt = f"{rx.get('snr'):.1f}" if (rx is not None and rx.get("snr") is not None) else "None"
-
-                bt_txt = f"{bme_temp:.2f}" if bme_temp is not None else "None"
-                bh_txt = f"{bme_hum:.2f}" if bme_hum is not None else "None"
-                bp_txt = f"{bme_press:.1f}" if bme_press is not None else "None"
 
                 status = "OK" if ok_match else "TIMEOUT"
 
@@ -781,7 +628,6 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
                     f"SNR={snr_txt} dB | "
                     f"rx_wait={rx_wait_ms:.1f} ms | "
                     f"e2e={e2e_ms:.1f} ms | "
-                    f"T={bt_txt} °C H={bh_txt} % P={bp_txt} hPa"
                 )
 
             row = {
@@ -806,11 +652,6 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
 
                 "rssi": (rx.get("rssi") if rx else None),
                 "snr": (rx.get("snr") if rx else None),
-
-                "bme_wait_ms": bme_wait_ms,
-                "bme_temp": bme_temp,
-                "bme_hum": bme_hum,
-                "bme_press": bme_press,
             }
 
             try:

@@ -163,7 +163,6 @@ def read_bme_values(slave_id):
         press = raw_p / 10.0        # hPa
 
         now = datetime.now().strftime('%H:%M:%S')
-        print(f"\n[Slave {slave_id}] BME280-Werte um {now}:")
         print(f"   Temperatur : {temp:.2f} °C")
         print(f"   Feuchte    : {hum:.2f} % rF")
         print(f"   Druck      : {press:.2f} hPa")
@@ -178,17 +177,6 @@ def read_bme_values(slave_id):
     except Exception as e:
         print(f"[Slave {slave_id}] Fehler beim BME-Lesen: {e}")
 
-# ---------- BME-MESSUNG AUSLÖSEN + LESEN ----------
-def trigger_bme_measurement(slave_id, auto_read=True):
-    """
-    Löst auf dem Slave eine BME280-Messung aus (CMD=11)
-    und liest optional direkt danach die BME-Register.
-    """
-    print(f"\nBME-Messung bei Slave {slave_id} ausloesen...")
-    send_command(slave_id, 11, "BME-Messung (CMD 11)")
-    if auto_read:
-        time.sleep(0.5)  # kurze Zeit für Messung + Register-Update
-        read_bme_values(slave_id)
 
 def read_full_state(slave_id):
     """Detaillierter Status inkl. BME-Werte."""
@@ -259,11 +247,6 @@ def read_full_state(slave_id):
         print(f"   RSSI            : {rssi/10:.1f} dBm")
         print(f"   SNR             : {snr/10:.1f} dB")
         print(f"   Sende-Zeit TX   : {tx_timestamp} sec")
-        print("-" * 40)
-        print(f"   BME280:")
-        print(f"      Temperatur   : {temp:.2f} °C")
-        print(f"      Feuchte      : {hum:.2f} % rF")
-        print(f"      Druck        : {press:.2f} hPa")
         print("-" * 40)
         print(f"   LoRa-Konfiguration:")
         print(f"      Frequenz     : {freq:.1f} MHz")
