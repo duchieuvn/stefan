@@ -10,7 +10,7 @@ class RTIConfig:
     db_path: Path = Path("reduced_data.db")
     db_max_age_hours: float = 8.0
     sequence_cache_dir: Path = Path("sequence_cache")
-    history_months: int = 3
+    history_months: int | None = 6  # None = all data from the first measurement
 
     dx: float = 0.4
     dy: float = 0.4

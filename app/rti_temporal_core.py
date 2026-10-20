@@ -28,6 +28,7 @@ from typing import Any
 
 import joblib
 import numpy as np
+from dateutil.relativedelta import relativedelta
 
 from config import RTIConfig
 from database import DatabaseProvider
@@ -45,14 +46,18 @@ def setup_logging(level: int = logging.INFO) -> None:
 # SQL (psycopg2 `%s` placeholders; the SQLite provider translates them)
 # ==========================================================================
 
+DATA_RANGE = "SELECT MIN(pc_ts), MAX(pc_ts) FROM measurement"
+
+# Params: (since_day,)
 DISTINCT_DAYS = """
     SELECT DISTINCT substr(pc_ts, 1, 10) AS day
     FROM measurement
     WHERE pc_ts IS NOT NULL
+      AND pc_ts >= %s
     ORDER BY day ASC
 """
 
-# Params: (start_hhmm, end_hhmm)
+# Params: (since_day, start_hhmm, end_hhmm)
 DAY_WINDOW_COVERAGE = """
     SELECT
         substr(pc_ts, 1, 10) AS day,
@@ -60,6 +65,7 @@ DAY_WINDOW_COVERAGE = """
         MAX(pc_ts) AS last_ts
     FROM measurement
     WHERE pc_ts IS NOT NULL
+      AND pc_ts >= %s
       AND substr(pc_ts, 12, 5) >= %s
       AND substr(pc_ts, 12, 5) <= %s
     GROUP BY substr(pc_ts, 1, 10)
@@ -77,6 +83,37 @@ MEASUREMENT_IN_RANGE = """
         AND receiver_id IS NOT NULL
         AND sender_id != receiver_id
     ORDER BY pc_ts ASC
+"""
+
+# PostgreSQL only (percentile_cont, FILTER, GROUPING SETS). Aggregates
+# MEASUREMENT_IN_RANGE for every day of one HH:MM window on the server, in a
+# single scan of measurement_pc_ts_idx. Rows with is_day_total = 1 carry the
+# per-day IntervalMeta, the others the per-link LinkStats.
+# Params: (since_day, start_hhmm, end_hhmm)
+LINK_DAY_STATS = """
+    SELECT
+        substr(pc_ts, 1, 10) AS day,
+        LEAST(sender_id, receiver_id) AS a,
+        GREATEST(sender_id, receiver_id) AS b,
+        GROUPING(LEAST(sender_id, receiver_id)) AS is_day_total,
+        COUNT(*) AS n_total,
+        COUNT(*) FILTER (WHERE ok_match = 1 AND rssi IS NOT NULL) AS n_ok,
+        percentile_cont(0.5) WITHIN GROUP (ORDER BY rssi) FILTER (WHERE ok_match = 1) AS rssi_median,
+        AVG(rssi) FILTER (WHERE ok_match = 1) AS rssi_avg,
+        MIN(pc_ts) AS first_ts,
+        MAX(pc_ts) AS last_ts,
+        COUNT(DISTINCT round_id) AS n_rounds
+    FROM measurement
+    WHERE pc_ts >= %s
+        AND substr(pc_ts, 12, 5) >= %s
+        AND substr(pc_ts, 12, 5) <= %s
+        AND sender_id IS NOT NULL
+        AND receiver_id IS NOT NULL
+        AND sender_id != receiver_id
+    GROUP BY GROUPING SETS (
+        (substr(pc_ts, 1, 10), LEAST(sender_id, receiver_id), GREATEST(sender_id, receiver_id)),
+        (substr(pc_ts, 1, 10))
+    )
 """
 
 
@@ -325,34 +362,72 @@ def _parse_pc_ts(value: Any) -> datetime:
 
 # --- Available dates ---
 
-def _dates_with_full_window_coverage(con: Any, start_hhmm: str, end_hhmm: str, tolerance_min: int) -> set[str]:
-    """Days whose measurements reach both edges of the window (within the tolerance)."""
+def history_start(con: Any, config: RTIConfig) -> str | None:
+    """First day (YYYY-MM-DD) of the last `config.history_months` months of data (all data
+    if it is None); None if the table is empty."""
+    earliest, latest = con.execute(DATA_RANGE).fetchone()
+    if latest is None:
+        return None
+    if config.history_months is None:
+        return str(earliest)[:10]
+    return (date.fromisoformat(str(latest)[:10]) - relativedelta(months=config.history_months)).isoformat()
+
+
+def _covers_window(day: str, first_ts: Any, last_ts: Any, start_hhmm: str, end_hhmm: str, tolerance_min: int) -> bool:
+    """True if the measurements of `day` reach both edges of the window (within the tolerance)."""
+    if first_ts is None or last_ts is None:
+        return False
     tol_s = tolerance_min * 60
-    usable: set[str] = set()
-
-    for day, first_ts, last_ts in con.execute(DAY_WINDOW_COVERAGE, (start_hhmm, end_hhmm)).fetchall():
-        if day is None or first_ts is None or last_ts is None:
-            continue
-        dt_start, dt_end = interval_bounds(str(day), start_hhmm, end_hhmm)
-        left_ok = (_parse_pc_ts(first_ts) - dt_start).total_seconds() <= tol_s
-        right_ok = (dt_end - _parse_pc_ts(last_ts)).total_seconds() <= tol_s
-        if left_ok and right_ok:
-            usable.add(str(day))
-
-    return usable
+    dt_start, dt_end = interval_bounds(day, start_hhmm, end_hhmm)
+    left_ok = (_parse_pc_ts(first_ts) - dt_start).total_seconds() <= tol_s
+    right_ok = (dt_end - _parse_pc_ts(last_ts)).total_seconds() <= tol_s
+    return left_ok and right_ok
 
 
-def get_available_dates(con: Any, config: RTIConfig) -> list[str]:
+def _dates_with_full_window_coverage(con: Any, since: str, start_hhmm: str, end_hhmm: str, tolerance_min: int) -> set[str]:
+    return {
+        str(day)
+        for day, first_ts, last_ts in con.execute(DAY_WINDOW_COVERAGE, (since, start_hhmm, end_hhmm)).fetchall()
+        if day is not None and _covers_window(str(day), first_ts, last_ts, start_hhmm, end_hhmm, tolerance_min)
+    }
+
+
+def get_available_dates(con: Any, config: RTIConfig, since: str) -> list[str]:
+    """Days on or after `since` with usable measurements (row-level path, e.g. SQLite)."""
     if not config.require_full_window_coverage:
-        return [str(r[0]) for r in con.execute(DISTINCT_DAYS).fetchall() if r[0] is not None]
+        return [str(r[0]) for r in con.execute(DISTINCT_DAYS, (since,)).fetchall() if r[0] is not None]
 
     tol = config.coverage_edge_tolerance_min
-    ref_days = _dates_with_full_window_coverage(con, config.ref_start_hhmm, config.ref_end_hhmm, tol)
-    cur_days = _dates_with_full_window_coverage(con, config.cur_start_hhmm, config.cur_end_hhmm, tol)
+    ref_days = _dates_with_full_window_coverage(con, since, config.ref_start_hhmm, config.ref_end_hhmm, tol)
+    cur_days = _dates_with_full_window_coverage(con, since, config.cur_start_hhmm, config.cur_end_hhmm, tol)
     return sorted(ref_days & cur_days)
 
 
 # --- Per-interval link statistics ---
+
+def _link_stat(n_total: int, n_ok: int, rssi_location: float | None) -> dict[str, Any]:
+    return {
+        "n_total": n_total,
+        "n_ok": n_ok,
+        "ok_rate": n_ok / n_total if n_total else None,
+        "rssi_mean": rssi_location,
+    }
+
+
+def _interval_meta(
+    start_ts: str, end_ts: str, first_ts: str | None, last_ts: str | None,
+    n_rows: int, n_ok_rows: int, n_rounds: int,
+) -> IntervalMeta:
+    return {
+        "start_ts_requested": start_ts,
+        "end_ts_requested": end_ts,
+        "first_ts_found": first_ts,
+        "last_ts_found": last_ts,
+        "n_measurements": n_rows,
+        "n_ok_measurements": n_ok_rows,
+        "n_rounds": n_rounds,
+    }
+
 
 def load_stats_for_interval(con: Any, start_ts: str, end_ts: str, config: RTIConfig) -> tuple[LinkStats, IntervalMeta]:
     counts: dict[Pair, dict[str, Any]] = defaultdict(lambda: {"n_total": 0, "n_ok": 0, "rssi_ok": []})
@@ -378,30 +453,19 @@ def load_stats_for_interval(con: Any, start_ts: str, end_ts: str, config: RTICon
 
     location = np.median if config.use_median_rssi else np.mean
     stats: LinkStats = {
-        pair: {
-            "n_total": d["n_total"],
-            "n_ok": d["n_ok"],
-            "ok_rate": d["n_ok"] / d["n_total"] if d["n_total"] else None,
-            "rssi_mean": float(location(d["rssi_ok"])) if d["rssi_ok"] else None,
-        }
+        pair: _link_stat(d["n_total"], d["n_ok"], float(location(d["rssi_ok"])) if d["rssi_ok"] else None)
         for pair, d in counts.items()
     }
-    meta: IntervalMeta = {
-        "start_ts_requested": start_ts,
-        "end_ts_requested": end_ts,
-        "first_ts_found": first_ts,
-        "last_ts_found": last_ts,
-        "n_measurements": n_rows,
-        "n_ok_measurements": n_ok_rows,
-        "n_rounds": len(round_ids),
-    }
+    meta = _interval_meta(start_ts, end_ts, first_ts, last_ts, n_rows, n_ok_rows, len(round_ids))
     return stats, meta
 
 
 class IntervalLoader:
     """Loads link statistics per (date, HH:MM window), memoizing the results.
 
-    Each interval uses its own short-lived connection.
+    Providers with `server_side_stats` get every day's statistics up front from
+    one LINK_DAY_STATS query per window (see `available_dates`); otherwise each
+    interval is loaded on demand with its own short-lived connection.
     """
 
     def __init__(self, database: DatabaseProvider, config: RTIConfig) -> None:
@@ -409,9 +473,73 @@ class IntervalLoader:
         self.config = config
         self._cache: dict[tuple[str, str], tuple[LinkStats, IntervalMeta]] = {}
 
-    def load(self, date_txt: str, start_hhmm: str, end_hhmm: str) -> tuple[LinkStats, IntervalMeta]:
+    @staticmethod
+    def _key(date_txt: str, start_hhmm: str, end_hhmm: str) -> tuple[str, str]:
         dt_start, dt_end = interval_bounds(date_txt, start_hhmm, end_hhmm)
-        key = (dt_start.isoformat(timespec="seconds"), dt_end.isoformat(timespec="seconds"))
+        return dt_start.isoformat(timespec="seconds"), dt_end.isoformat(timespec="seconds")
+
+    def _windows(self) -> tuple[tuple[str, str], tuple[str, str]]:
+        cfg = self.config
+        return (cfg.ref_start_hhmm, cfg.ref_end_hhmm), (cfg.cur_start_hhmm, cfg.cur_end_hhmm)
+
+    def available_dates(self) -> list[str]:
+        """Days with usable measurements within the last `config.history_months` months."""
+        con = self.database.connect()
+        try:
+            since = history_start(con, self.config)
+            if since is None:
+                return []
+            months = self.config.history_months
+            logging.info("Using data since %s (%s).", since, "all data" if months is None else f"last {months} months")
+            if not self.database.server_side_stats:
+                return get_available_dates(con, self.config, since)
+            ref_window, cur_window = self._windows()
+            metas = {window: self._prefetch(con, since, *window) for window in {ref_window, cur_window}}
+        finally:
+            con.close()
+
+        if self.config.require_full_window_coverage:
+            tol = self.config.coverage_edge_tolerance_min
+            usable = [
+                {day for day, m in metas[w].items() if _covers_window(day, m["first_ts_found"], m["last_ts_found"], *w, tol)}
+                for w in (ref_window, cur_window)
+            ]
+            dates = sorted(usable[0] & usable[1])
+        else:
+            dates = sorted(set(metas[ref_window]) | set(metas[cur_window]))
+
+        # Days without rows in one window would otherwise fall back to a per-day query.
+        for date_txt in dates:
+            for window in (ref_window, cur_window):
+                key = self._key(date_txt, *window)
+                self._cache.setdefault(key, ({}, _interval_meta(*key, None, None, 0, 0, 0)))
+        return dates
+
+    def _prefetch(self, con: Any, since: str, start_hhmm: str, end_hhmm: str) -> dict[str, IntervalMeta]:
+        """Caches the statistics of every day since `since` for one window; returns the metas by day."""
+        logging.info("Aggregating link statistics on the server (%s–%s since %s)...", start_hhmm, end_hhmm, since)
+        stats: dict[str, LinkStats] = defaultdict(dict)
+        metas: dict[str, IntervalMeta] = {}
+
+        rows = con.execute(LINK_DAY_STATS, (since, start_hhmm, end_hhmm)).fetchall()
+        for day, a, b, is_day_total, n_total, n_ok, rssi_median, rssi_avg, first_ts, last_ts, n_rounds in rows:
+            day = str(day)
+            if is_day_total:
+                key = self._key(day, start_hhmm, end_hhmm)
+                metas[day] = _interval_meta(*key, str(first_ts), str(last_ts), int(n_total), int(n_ok), int(n_rounds))
+            else:
+                location = rssi_median if self.config.use_median_rssi else rssi_avg
+                stats[day][pair_key(a, b)] = _link_stat(
+                    int(n_total), int(n_ok), float(location) if n_ok and location is not None else None
+                )
+
+        for day, meta in metas.items():
+            self._cache[self._key(day, start_hhmm, end_hhmm)] = (stats[day], meta)
+        logging.info("Aggregated %d rows into %d days.", len(rows), len(metas))
+        return metas
+
+    def load(self, date_txt: str, start_hhmm: str, end_hhmm: str) -> tuple[LinkStats, IntervalMeta]:
+        key = self._key(date_txt, start_hhmm, end_hhmm)
 
         if key not in self._cache:
             logging.debug("Loading interval %s – %s", *key)

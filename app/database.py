@@ -87,8 +87,20 @@ class SSHSettings:
 BACKENDS = ("sqlite", "postgres", "pg-tailscale")
 
 
+def default_backend() -> str:
+    """`RTI_DB_BACKEND` from `.env`, falling back to "sqlite"."""
+    backend = _env_optional("RTI_DB_BACKEND", "sqlite")
+    if backend not in BACKENDS:
+        raise SettingsError(f"RTI_DB_BACKEND must be one of {BACKENDS}, got {backend!r}")
+    return backend
+
+
 class DatabaseProvider(Protocol):
-    """Minimal database interface required by the temporal RTI loader."""
+    """Minimal database interface required by the temporal RTI loader.
+
+    `server_side_stats` providers can run the aggregate `LINK_DAY_STATS` query.
+    """
+    server_side_stats: bool
     def connect(self) -> Any: ...
     def close(self) -> None: ...
 
@@ -113,6 +125,8 @@ class _SQLiteConnection:
 
 
 class SQLiteDatabase:
+    server_side_stats = False  # no percentile_cont in SQLite
+
     def __init__(self, path: Path):
         self.path = path
         if not self.path.is_file():
@@ -157,17 +171,39 @@ class _PostgresConnection:
         return getattr(self._connection, name)
 
 
+def _env_seconds(name: str, default: int) -> int:
+    raw = _env_optional(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise SettingsError(f"{name} must be an integer") from error
+    if value <= 0:
+        raise SettingsError(f"{name} must be greater than 0")
+    return value
+
+
 def _connect_postgres(dsn: str, **kwargs: Any) -> _PostgresConnection:
+    """Connects with bounded connect and statement times, so a slow server fails instead of hanging."""
+    connect_timeout = _env_seconds("RTI_DB_CONNECT_TIMEOUT_S", 60)
+    statement_timeout_ms = _env_seconds("RTI_DB_STATEMENT_TIMEOUT_S", 600) * 1000
     try:
         import psycopg2
 
-        return _PostgresConnection(psycopg2.connect(dsn, **kwargs))
+        return _PostgresConnection(psycopg2.connect(
+            dsn,
+            connect_timeout=connect_timeout,
+            # work_mem keeps the LINK_DAY_STATS sort in memory instead of spilling to disk.
+            options=f"-c statement_timeout={statement_timeout_ms} -c work_mem=256MB",
+            **kwargs,
+        ))
     except Exception as error:
         raise DatabaseConnectionError(f"Could not connect to PostgreSQL: {error}") from error
 
 
 class PostgresDatabase:
     """Connects directly to PostgreSQL (e.g. via its Tailscale address)."""
+
+    server_side_stats = True
 
     def __init__(self, dsn: str) -> None:
         self.dsn = dsn
@@ -185,6 +221,8 @@ class PostgresDatabase:
 
 class PostgresTunnelDatabase:
     """Owns a persistent SSH forwarder while returning short-lived DB sessions."""
+
+    server_side_stats = True
 
     def __init__(self, dsn: str, ssh: SSHSettings, db_host: str, db_port: int) -> None:
         self.dsn = dsn

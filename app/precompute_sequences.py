@@ -7,6 +7,10 @@ treated as a reference day; the full temporal sequence relative to it is
 computed and saved to `sequence_cache/<date>.joblib`, overwriting old files.
 The viewer (main.py) only loads these files.
 
+With a PostgreSQL backend the per-day link statistics are aggregated on the
+server in one query; with SQLite they are computed from the raw rows of a
+local copy synced over SFTP.
+
 Usage:
     python precompute_sequences.py [--db sqlite|postgres|pg-tailscale]
 """
@@ -14,48 +18,31 @@ Usage:
 import argparse
 import logging
 from dataclasses import replace
-from datetime import date, timedelta
-
-from dateutil.relativedelta import relativedelta
+from datetime import timedelta
 
 from config import DEFAULT_CONFIG, RTIConfig
-from database import BACKENDS, DatabaseProvider, ensure_local_database_current, open_database
+from database import BACKENDS, DatabaseProvider, default_backend, ensure_local_database_current, open_database
 from rti_temporal_core import (
     IntervalLoader,
     build_model_context,
     compute_temporal_sequence,
-    get_available_dates,
     prune_cache,
     save_cached_sequence,
     setup_logging,
 )
 
 
-def _recent_dates(dates: list[str], months: int) -> list[str]:
-    latest = date.fromisoformat(max(dates))
-    cutoff = latest - relativedelta(months=months)
-    logging.info("Keeping dates from %s to %s (last %d months).", cutoff, latest, months)
-    return [d for d in dates if date.fromisoformat(d) >= cutoff]
-
-
 def precompute_all(config: RTIConfig, database: DatabaseProvider) -> None:
     """Computes and saves the sequence for every reference date."""
-    con = database.connect()
-    try:
-        dates = get_available_dates(con, config)
-    finally:
-        con.close()
-
-    if dates:
-        dates = _recent_dates(dates, config.history_months)
+    # Daily intervals are reused across all reference sequences.
+    loader = IntervalLoader(database, config)
+    dates = loader.available_dates()
     if not dates:
         logging.error("No usable dates found in the database. Aborting.")
         return
 
-    logging.info("Found %d dates to process. Building RTI model context...", len(dates))
+    logging.info("Found %d dates to process (%s … %s). Building RTI model context...", len(dates), dates[0], dates[-1])
     context = build_model_context(config)
-    # Daily intervals are reused across all reference sequences.
-    loader = IntervalLoader(database, config)
 
     for i, ref_date in enumerate(dates, start=1):
         logging.info("Processing reference date %d/%d: %s", i, len(dates), ref_date)
@@ -71,9 +58,11 @@ def precompute_all(config: RTIConfig, database: DatabaseProvider) -> None:
     logging.info("Pre-computation finished.")
 
 
-def run(config: RTIConfig = DEFAULT_CONFIG, backend: str = "sqlite") -> None:
+def run(config: RTIConfig = DEFAULT_CONFIG, backend: str | None = None) -> None:
     """Pre-computes all sequences from `backend`. For SQLite, first makes sure the
-    local database copy is fresh (syncing from the remote host if needed)."""
+    local database copy is fresh (syncing from the remote host if needed).
+    `backend` defaults to RTI_DB_BACKEND from `.env`."""
+    backend = backend or default_backend()
     if backend == "sqlite":
         db_path = ensure_local_database_current(config.db_path.parent, timedelta(hours=config.db_max_age_hours))
         config = replace(config, db_path=db_path)
@@ -93,10 +82,11 @@ def main() -> None:
     parser.add_argument(
         "--db",
         choices=BACKENDS,
-        default="sqlite",
-        help="Database backend (default: sqlite). 'sqlite' uses the newest local "
+        default=None,
+        help="Database backend (default: RTI_DB_BACKEND from .env, else sqlite). 'sqlite' uses the newest local "
         "reduced_data_*.db, syncing a fresh one from the remote host first if missing or older than "
-        f"{DEFAULT_CONFIG.db_max_age_hours:g} h; 'postgres' uses an SSH tunnel; 'pg-tailscale' connects directly.",
+        f"{DEFAULT_CONFIG.db_max_age_hours:g} h; 'postgres' uses an SSH tunnel; 'pg-tailscale' connects directly "
+        "(both aggregate on the server).",
     )
     args = parser.parse_args()
     run(DEFAULT_CONFIG, backend=args.db)

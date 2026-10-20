@@ -141,6 +141,11 @@ def create_postgres_schema(pg: psycopg2.extensions.connection) -> None:
             columns = ", ".join(f"{name} {type_}" for name, type_ in schema.items())
             cursor.execute(f"CREATE TABLE IF NOT EXISTS {table} ({columns})")
         cursor.execute("CREATE INDEX IF NOT EXISTS measurement_round_id_idx ON measurement(round_id)")
+        # Covering index for the RTI app's time-range aggregates (index-only scans).
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS measurement_pc_ts_idx ON measurement(pc_ts) "
+            "INCLUDE (sender_id, receiver_id, ok_match, rssi, round_id)"
+        )
 
 
 # --- Sync ---

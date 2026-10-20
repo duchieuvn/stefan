@@ -117,8 +117,12 @@ Run everything from inside `app/` (paths such as `.env`, `sequence_cache/` and
 
 - `main.py` — Tk viewer (reference-day and sequence sliders). Runs the
   pre-computation behind a splash screen when the cache is not from today.
-- `precompute_sequences.py` — CLI (`--db sqlite|postgres|pg-tailscale`) that
-  computes one sequence per reference day into `sequence_cache/`.
+- `precompute_sequences.py` — CLI (`--db sqlite|postgres|pg-tailscale`,
+  default `RTI_DB_BACKEND` from `.env`) that computes one sequence per
+  reference day into `sequence_cache/`. With PostgreSQL, all per-day link
+  statistics come from one server-side aggregate (`LINK_DAY_STATS`, ~2.5k rows
+  for 3 months) that uses the covering index
+  `measurement_pc_ts_idx ON measurement (pc_ts) INCLUDE (sender_id, receiver_id, ok_match, rssi, round_id)`.
 - `config.py` — `RTIConfig`, all tunable parameters (grid resolution,
   regularization weights, node positions, time windows, history length).
 - `rti_temporal_core.py` — all numerics, no UI: SQL queries, model (grid,
@@ -127,7 +131,8 @@ Run everything from inside `app/` (paths such as `.env`, `sequence_cache/` and
   `compute_temporal_sequence` and the on-disk cache helpers.
 - `rti_temporal_visualization.py` — Matplotlib drawing for the 4-panel figure (no Tk).
 - `database.py` — `.env` settings, SQLite / PostgreSQL providers
-  (`open_database()`), and the SFTP sync of the local `reduced_data_*.db`.
+  (`open_database()`, `default_backend()`), and the SFTP sync of the local
+  `reduced_data_*.db` (used only by the `sqlite` fallback backend).
 
 ## Why `solve_temporal` Cannot Solve Independently
 
