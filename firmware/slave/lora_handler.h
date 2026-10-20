@@ -77,7 +77,7 @@ static uint32_t _lastUiMs = 0;
 extern SX1262 radio;
 
 extern String deviceId;
-extern const uint8_t SLAVE_ID;
+extern uint8_t SLAVE_ID;  // aus NVS, siehe device_id.h
 
 // Diese Funktion kommt aus modbus_handler.* (oder wo du sie implementierst)
 void updateLoRaInfo(const String& idStr, uint32_t timestamp, float rssi, float snr);

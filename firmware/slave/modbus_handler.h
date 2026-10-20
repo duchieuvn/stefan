@@ -2,6 +2,8 @@
 #include <ModbusRTU.h>
 #include "lora_handler.h"
 #include "heltec_led.h"
+#include "ota_handler.h"
+#include "device_id.h"
 
 extern SX1262 radio;
 extern String deviceId;  // wird im Setup gesetzt (getMacFull())
@@ -9,7 +11,7 @@ extern String deviceId;  // wird im Setup gesetzt (getMacFull())
 // ------------------------------
 // 🆔 Eigene Gerätekennung
 // ------------------------------
-extern const uint8_t SLAVE_ID;
+extern uint8_t SLAVE_ID;  // aus NVS, siehe device_id.h
 
 // Change these pins according to your TTL ebay modbus
 #define TXD1 6
@@ -20,6 +22,8 @@ extern const uint8_t SLAVE_ID;
 // ------------------------------
 // Eigene Kennung
 const uint16_t OWN_ID_REGISTER     = 10;   // eigene Slave-ID
+const uint16_t NEW_ID_REGISTER     = 11;   // neue Slave-ID, wird mit CMD 20/22 im NVS gespeichert
+const uint16_t TARGET_MAC_BASE     = 12;   // Ziel-MAC fuer CMD 22 (12 ASCII-Zeichen, 2 pro Register)
 const uint16_t OWN_MAC_REG_BASE    = 20;   // eigene MAC (12x ASCII-Zeichen)
 
 // Empfangene Daten über LoRa
@@ -47,6 +51,11 @@ const uint16_t PAYLOAD_WORDS      = (PAYLOAD_MAX_BYTES + 1) / 2; // 32 Words
 //  2  = LED aus
 // 10  = LoRa-Broadcast
 // 11  = BME280-Messung ausführen
+// 20  = Slave-ID aus Register 11 im NVS speichern + Neustart
+// 21  = gespeicherte Slave-ID loeschen + Neustart (→ neue Zufalls-ID)
+// 22  = nur wenn MAC = Reg 12..17: ID aus Reg 11 speichern + Neustart (per Broadcast an alle)
+// 50  = OTA-Update starten (Parameter ab Register 510, siehe ota_handler.h)
+// 51  = OTA-Update abbrechen
 // 99  = Neustart
 
 const uint16_t TX_TIMESTAMP_BASE   = 300;  // 2x16bit → Timestamp zum Senden
@@ -79,6 +88,8 @@ void setupModbus() {
 
   // Eigene ID + MAC ablegen
   mb.addHreg(OWN_ID_REGISTER, SLAVE_ID);
+  mb.addHreg(NEW_ID_REGISTER, 0);
+  mb.addHreg(TARGET_MAC_BASE, 0, 6);
   for (int i = 0; i < 12; i++) {
     mb.addHreg(OWN_MAC_REG_BASE + i, deviceId[i]);
   }
@@ -113,6 +124,9 @@ void setupModbus() {
   mb.addHreg(LORA_BW_REGISTER, 125);
   mb.addHreg(LORA_CR_REGISTER, 5);
   mb.addHreg(LORA_APPLY_CMD, 0);
+
+  // OTA-Register (500..675)
+  otaSetupRegisters();
 }
 
 void updateLoRaInfo(const String& idStr, uint32_t timestamp, float rssi, float snr) {
@@ -200,6 +214,7 @@ void triggerMeasurement() {
 void modbusTask() {
   mb.task();
   yield();
+  otaSyncRegisters();  // OTA-Status/Fortschritt fuer den Master (500..502)
 
   uint16_t cmd = mb.Hreg(CMD_REGISTER);
   if (cmd != lastCmdVal) {
@@ -220,6 +235,60 @@ void modbusTask() {
       case 10:
         Serial.println("📡 Befehl: LoRa-Broadcast");
         triggerMeasurement();
+        break;
+
+      case 20: {
+        uint16_t newId = mb.Hreg(NEW_ID_REGISTER);
+        mb.Hreg(NEW_ID_REGISTER, 0);
+        if (newId < 1 || newId > 247) {
+          Serial.printf("⚠️ Ungültige neue Slave-ID: %u\n", newId);
+          break;
+        }
+        Serial.printf("🆔 Befehl: Slave-ID %u -> %u, Neustart\n", SLAVE_ID, newId);
+        saveSlaveId((uint8_t)newId);
+        delay(100);  // Modbus-Antwort fertig senden
+        ESP.restart();
+        break;
+      }
+
+      case 21:
+        Serial.printf("🆔 Befehl: Slave-ID %u loeschen, Neustart mit neuer Zufalls-ID\n", SLAVE_ID);
+        saveSlaveId(0);
+        delay(100);  // Modbus-Antwort fertig senden
+        ESP.restart();
+        break;
+
+      case 22: {
+        char target[13];
+        for (int i = 0; i < 6; i++) {
+          uint16_t w = mb.Hreg(TARGET_MAC_BASE + i);
+          target[2 * i]     = (char)(w >> 8);
+          target[2 * i + 1] = (char)(w & 0xFF);
+          mb.Hreg(TARGET_MAC_BASE + i, 0);
+        }
+        target[12] = '\0';
+        uint16_t newId = mb.Hreg(NEW_ID_REGISTER);
+        mb.Hreg(NEW_ID_REGISTER, 0);
+        if (!deviceId.equalsIgnoreCase(target)) break;  // anderes Board gemeint
+        if (newId < 1 || newId > 247) {
+          Serial.printf("⚠️ Ungültige neue Slave-ID: %u\n", newId);
+          break;
+        }
+        Serial.printf("🆔 Befehl: Slave-ID per MAC %u -> %u, Neustart\n", SLAVE_ID, newId);
+        saveSlaveId((uint8_t)newId);
+        delay(100);
+        ESP.restart();
+        break;
+      }
+
+      case CMD_OTA_START:
+        Serial.println("🔄 Befehl: OTA-Update");
+        otaStart();
+        break;
+
+      case CMD_OTA_ABORT:
+        Serial.println("⏹️ Befehl: OTA abbrechen");
+        otaAbort();
         break;
 
       case 99:

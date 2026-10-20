@@ -13,8 +13,9 @@ SSD1306Wire oled(OLED_I2C_ADDR, OLED_SDA_PIN, OLED_SCL_PIN, OLED_GEOMETRY, I2C_O
 // WICHTIG: radio nur 1x definieren
 SX1262 radio = new Module(LORA_PIN_NSS, LORA_PIN_DIO1, LORA_PIN_RST, LORA_PIN_BUSY);
 
-// SLAVE_ID bitte EINMAL global 
-const uint8_t SLAVE_ID = 10;
+// Slave-ID: beim ersten Start zufaellig (1..247) und im NVS gespeichert; aendern per Modbus
+// (Reg 11 = neue ID, dann CMD 20; CMD 21 = neu auslosen). Siehe device_id.h.
+uint8_t SLAVE_ID;
 
 
 String deviceId;
@@ -22,6 +23,7 @@ String deviceId;
 void setup() {
   Serial.begin(115200);
   deviceId = getMacFull();
+  SLAVE_ID = loadSlaveId();
 
   oledInit();
   oledDrawRssiSnr(NAN, NAN, SLAVE_ID);
@@ -33,5 +35,9 @@ void setup() {
 void loop() {
   runReceiver();
   modbusTask();
-  loraUiTask(1000);
+  if (otaActive()) {
+    otaUiTask(500);
+  } else {
+    loraUiTask(800);
+  }
 }

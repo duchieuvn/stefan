@@ -9,11 +9,25 @@ logging.getLogger("pymodbus").setLevel(logging.ERROR)
 logging.getLogger("pymodbus.logging").setLevel(logging.ERROR)
 
 # ---------- KONFIGURATION ----------
-PORT = '/dev/ttyUSB1'  # Windows: richtiger COM-Port
+PORT = '/dev/ttyUSB0'  # Windows: richtiger COM-Port
 
 BAUDRATE = 9600
 CMD_REGISTER = 200
-SLAVE_IDS = [91, 92, 93]  # IDs deiner Knoten
+SLAVE_IDS = [10, 11, 12]  # IDs deiner Knoten (wird durch Bus-Scan ersetzt)
+
+# ID-Register / Befehl zum Aendern der ID (siehe slave/modbus_handler.h)
+OWN_ID_REG = 10
+NEW_ID_REG = 11
+MAC_REG_BASE = 20     # 12 ASCII-Zeichen
+CMD_SET_ID = 20       # neue ID aus Reg 11 im NVS speichern + Neustart
+CMD_AUTO_ID = 21      # gespeicherte ID loeschen + Neustart → Slave lost neue Zufalls-ID aus
+TARGET_MAC_REG = 12   # Ziel-MAC fuer CMD 22 (12 ASCII-Zeichen, 2 pro Register)
+CMD_SET_ID_BY_MAC = 22  # per Broadcast: nur das Board mit dieser MAC speichert Reg 11 + Neustart
+BROADCAST_ID = 0      # alle Slaves fuehren aus, keiner antwortet
+
+# Bus-Scan: kurzer Timeout ohne Retries, sonst dauert ein Scan ueber 1..247 Minuten
+SCAN_TIMEOUT = 0.2
+SCAN_FIRST, SCAN_LAST = 1, 247  # Bereich fuer den Scan beim Start; enger = schneller
 
 # BME-Register
 BME_TEMP_REG = 120   # °C ×100, int16
@@ -294,15 +308,160 @@ def set_lora_config(slave_id):
     except Exception as e:
         print(f"[Slave {slave_id}] Fehler: {e}")
 
+# ---------- BUS-SCAN / ID ----------
+def scan_bus(first=1, last=247):
+    """Fragt Reg 10 (eigene ID) bei jeder Adresse ab und setzt SLAVE_IDS auf die gefundenen IDs."""
+    global SLAVE_IDS
+    print(f"\nScanne Slave-IDs {first}..{last} (ca. {(last - first + 1) * SCAN_TIMEOUT:.0f} s)...")
+
+    # Eigener Client mit kurzem Timeout; der Port kann nur einmal offen sein
+    client.close()
+    scanner = ModbusSerialClient(
+        port=PORT,
+        baudrate=BAUDRATE,
+        stopbits=1,
+        bytesize=8,
+        parity='N',
+        timeout=SCAN_TIMEOUT,
+        retries=0,
+    )
+    found = []
+    try:
+        if not scanner.connect():
+            print("Scan: Port konnte nicht geoeffnet werden.")
+            return found
+        for sid in range(first, last + 1):
+            try:
+                res = scanner.read_holding_registers(address=OWN_ID_REG, count=1, device_id=sid)
+            except ModbusException:
+                continue
+            if res is None or res.isError() or res.registers[0] != sid:
+                continue
+
+            mac = "?"
+            try:
+                res_mac = scanner.read_holding_registers(address=MAC_REG_BASE, count=12, device_id=sid)
+                if not res_mac.isError():
+                    mac = ''.join(chr(c) for c in res_mac.registers)
+            except ModbusException:
+                pass
+            print(f"   gefunden: Slave {sid}  MAC {mac}")
+            found.append((sid, mac))
+    finally:
+        scanner.close()
+        client.connect()
+
+    if found:
+        SLAVE_IDS = [sid for sid, _ in found]
+        print(f"\nVerfuegbare Slaves ({len(found)}):")
+        for sid, mac in found:
+            print(f"   ID {sid:>3}   MAC {mac}")
+    else:
+        print("Keine Slaves gefunden, SLAVE_IDS unveraendert.")
+    return SLAVE_IDS if found else []
+
+def change_slave_id(slave_id):
+    """Speichert eine neue ID dauerhaft im NVS des Slaves. Gibt die neue ID zurueck (oder die alte bei Fehler)."""
+    try:
+        new_id = int(input(f"Neue ID fuer Slave {slave_id} (1–247, 0 = neue Zufalls-ID): "))
+    except ValueError:
+        print("Bitte eine gueltige Zahl eingeben")
+        return slave_id
+    if new_id == 0:
+        # Wirkt auf alle Slaves mit dieser ID: jeder lost seine eigene neue ID aus
+        # (so lassen sich auch doppelte IDs trennen, deren Antworten kollidieren)
+        send_command(slave_id, CMD_AUTO_ID, "neue Zufalls-ID + Neustart")
+        SLAVE_IDS[:] = [sid for sid in SLAVE_IDS if sid != slave_id]
+        print("Slave(s) starten neu mit einer Zufalls-ID. Mit [s] neu scannen.")
+        return slave_id
+    if not 1 <= new_id <= 247 or new_id == slave_id:
+        print("Ungueltige ID.")
+        return slave_id
+    if new_id in SLAVE_IDS:
+        print(f"ID {new_id} ist bereits vergeben (letzter Scan: {SLAVE_IDS}).")
+        return slave_id
+
+    try:
+        result = client.write_register(NEW_ID_REG, new_id, device_id=slave_id)
+        if result is None or result.isError():
+            print(f"[Slave {slave_id}] Fehler beim Schreiben der neuen ID: {result}")
+            return slave_id
+    except ModbusException as e:
+        print(f"[Slave {slave_id}] Keine Antwort: {e}")
+        return slave_id
+
+    send_command(slave_id, CMD_SET_ID, f"ID-Wechsel auf {new_id} + Neustart")
+    SLAVE_IDS[:] = [new_id if sid == slave_id else sid for sid in SLAVE_IDS]
+    print(f"Slave startet neu und meldet sich als ID {new_id}.")
+    return new_id
+
+def change_id_by_mac():
+    """Setzt die ID des Boards mit einer bestimmten MAC (wie auf dem OLED), auch bei doppelten IDs."""
+    raw = input("MAC-Adresse (wie auf dem OLED, z. B. 48CA433A6C6C): ")
+    mac = ''.join(c for c in raw if c not in ":-. ").upper()
+    if len(mac) != 12 or any(c not in "0123456789ABCDEF" for c in mac):
+        print("Ungueltige MAC (12 Hex-Zeichen).")
+        return
+    try:
+        new_id = int(input("Neue ID (1–247): "))
+    except ValueError:
+        print("Bitte eine gueltige Zahl eingeben")
+        return
+    if not 1 <= new_id <= 247:
+        print("Ungueltige ID.")
+        return
+    if new_id in SLAVE_IDS:
+        print(f"ID {new_id} ist bereits vergeben (letzter Scan: {SLAVE_IDS}).")
+        return
+
+    # Broadcast: jedes Board bekommt Reg 11..17 und CMD 22, nur das mit passender MAC uebernimmt
+    regs = [new_id] + [(ord(mac[i]) << 8) | ord(mac[i + 1]) for i in range(0, 12, 2)]
+    try:
+        client.write_registers(NEW_ID_REG, regs, device_id=BROADCAST_ID, no_response_expected=True)
+        time.sleep(0.3)  # Pause, damit die Slaves die beiden Frames getrennt erkennen
+        client.write_register(CMD_REGISTER, CMD_SET_ID_BY_MAC, device_id=BROADCAST_ID,
+                              no_response_expected=True)
+    except ModbusException as e:
+        print(f"Fehler beim Senden: {e}")
+        return
+    print(f"An MAC {mac} gesendet: neue ID {new_id}. Warte auf Neustart...")
+
+    # Pruefen: antwortet unter der neuen ID ein Board mit genau dieser MAC?
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        time.sleep(1)
+        try:
+            res = client.read_holding_registers(address=MAC_REG_BASE, count=12, device_id=new_id)
+        except ModbusException:
+            continue
+        if res is None or res.isError():
+            continue
+        found = ''.join(chr(c) for c in res.registers)
+        if found == mac:
+            if new_id not in SLAVE_IDS:
+                SLAVE_IDS.append(new_id)
+            print(f"OK: Board {mac} meldet sich als ID {new_id}.")
+        else:
+            print(f"Unter ID {new_id} antwortet ein anderes Board ({found}).")
+        return
+    print(f"Keine Antwort unter ID {new_id}. MAC richtig? Board mit neuer Firmware? Mit [s] scannen.")
+
 # ---------- MENÜ ----------
 def slave_menu():
     while True:
+        choice = input(f"Slave-ID eingeben (1–247), [s] Bus scannen oder [k] ID per MAC setzen {SLAVE_IDS}: ").strip().lower()
+        if choice == 's':
+            scan_bus()
+            continue
+        if choice == 'k':
+            change_id_by_mac()
+            continue
         try:
-            slave_id = int(input("Neue Slave-ID eingeben (1–254): "))
-            if 1 <= slave_id <= 254:
+            slave_id = int(choice)
+            if 1 <= slave_id <= 247:
                 return slave_id
             else:
-                print("Ungueltige ID (1–254)")
+                print("Ungueltige ID (1–247)")
         except ValueError:
             print("Bitte eine gueltige Zahl eingeben")
 
@@ -317,7 +476,10 @@ def command_menu(slave_id):
         print("[a] Alle Slaves: Befehl senden")
         print("[v] Alle Slaves: Kurz-Werte anzeigen")
         print("[f] Aktiven Slave: Vollstaendige Werte (inkl. BME)")
-        print("[i] Slave-ID aendern")
+        print("[s] Bus scannen (verfuegbare Slave-IDs suchen)")
+        print("[n] ID des aktiven Slaves dauerhaft aendern")
+        print("[k] ID per MAC-Adresse aendern (auch bei doppelten IDs)")
+        print("[i] Anderen Slave waehlen")
         print("[q] Beenden")
 
         choice = input("Eingabe: ").strip().lower()
@@ -381,6 +543,12 @@ def command_menu(slave_id):
             read_all_slave_values()
         elif choice == 'f':
             read_full_state(slave_id)
+        elif choice == 's':
+            scan_bus()
+        elif choice == 'n':
+            slave_id = change_slave_id(slave_id)
+        elif choice == 'k':
+            change_id_by_mac()
         elif choice == 'i':
             return 'change_id'
         elif choice == 'q':
@@ -392,9 +560,10 @@ def command_menu(slave_id):
 if client.connect():
     print("Verbindung zum Modbus hergestellt")
 
-    slave_id = slave_menu()
-
     try:
+        scan_bus(SCAN_FIRST, SCAN_LAST)
+        slave_id = slave_menu()
+
         while True:
             action = command_menu(slave_id)
             if action == 'change_id':

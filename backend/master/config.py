@@ -63,3 +63,9 @@ DEFAULT_CR = int(env["DEFAULT_CR"])
 # Terminal logging
 VERBOSE = env["VERBOSE"] == "true"
 PRINT_LINK_LINE = env["PRINT_LINK_LINE"] == "true"
+
+# Firmware update (OTA, see ota_update.py). Optional keys: an older .env still works.
+OTA_PORT = env.get("OTA_PORT", PORT)
+# One app image ("Export Compiled Binary") for all nodes; each node keeps its ID in NVS
+OTA_URL = env.get("OTA_URL", "https://github.com/duchieuvn/stefan/releases/latest/download/slave.bin")
+OTA_NODE_TIMEOUT_S = float(env.get("OTA_NODE_TIMEOUT_S", "300"))

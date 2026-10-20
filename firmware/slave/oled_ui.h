@@ -28,6 +28,7 @@
 
 // Display wird GENAU 1x in der .ino definiert
 extern SSD1306Wire oled;
+extern String deviceId;  // MAC, wird im Setup gesetzt (getMacFull())
 
 inline void oledVextOn() {
   pinMode(VEXT_CTRL_PIN, OUTPUT);
@@ -57,6 +58,15 @@ inline void oledInit() {
   oled.display();
 }
 
+// Fusszeile: Linie + "ID: 11 - 48CA433A6C6C" (max. ~120 px breit)
+inline void oledDrawFooter(uint8_t slaveId) {
+  oled.drawLine(0, 52, 127, 52);
+  oled.setFont(ArialMT_Plain_10);
+  oled.setTextAlignment(TEXT_ALIGN_CENTER);
+  oled.drawString(64, 54, "ID: " + String(slaveId) + " - " + deviceId);
+  oled.setTextAlignment(TEXT_ALIGN_LEFT);
+}
+
 inline void oledDrawRssiSnr(float rssi, float snr, uint8_t slaveId) {
   oled.clear();
   oled.setTextAlignment(TEXT_ALIGN_LEFT);
@@ -80,14 +90,28 @@ inline void oledDrawRssiSnr(float rssi, float snr, uint8_t slaveId) {
   oled.drawString(0,  18, r);
   oled.drawString(68, 18, s);
 
-  // Footer-Linie + Slave-ID in der letzten Zeile
-  oled.drawLine(0, 52, 127, 52);
+  // Footer-Linie + Slave-ID und MAC in der letzten Zeile
+  oledDrawFooter(slaveId);
 
-  oled.setFont(ArialMT_Plain_10);
-  oled.setTextAlignment(TEXT_ALIGN_CENTER);
-  oled.drawString(64, 54, "Slave ID: " + String(slaveId));
+
+  oled.display();
+}
+
+// Anzeige während eines OTA-Updates (Status-Codes siehe ota_handler.h)
+inline void oledDrawOta(uint16_t status, uint16_t progress, uint8_t slaveId) {
+  const char* text = status == 1 ? "WLAN ..." : status == 2 ? "Download" : status == 3 ? "Pruefe ..." :
+                     status == 4 ? "Neustart" : "Fehler";
+
+  oled.clear();
   oled.setTextAlignment(TEXT_ALIGN_LEFT);
+  oled.setFont(ArialMT_Plain_10);
+  oled.drawString(0, 0, "Firmware-Update");
 
+  oled.setFont(ArialMT_Plain_24);
+  oled.drawString(0, 14, status == 2 ? String(progress) + " %" : String(text));
+  oled.drawProgressBar(0, 42, 127, 8, progress > 100 ? 100 : progress);
+
+  oledDrawFooter(slaveId);
 
   oled.display();
 }

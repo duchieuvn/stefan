@@ -13,6 +13,7 @@ show what it is doing. Everything else here is a client of that daemon:
     python manage_services.py start pump sync # start / stop / run-now take service keys
     python manage_services.py stop pump
     python manage_services.py run-now pump    # run a scheduled job now
+    python manage_services.py ota             # update the slave firmware over WiFi (asks for it)
     python manage_services.py shutdown        # stop all services and the daemon
     python manage_services.py daemon          # run the daemon in the foreground
 
@@ -20,6 +21,10 @@ The UI and the start commands start the daemon in the background when it is not
 running yet. Quitting the UI leaves the daemon and its services running. Run this
 with the Python environment the services need (e.g. the `stefan` conda env); the
 daemon and the services use that same interpreter.
+
+One-shot services (the firmware update) run once with settings given at start
+(e.g. WiFi credentials, kept only in memory while they run), are never restarted
+and are left out of start-all.
 
 Copies of a service started by hand (e.g. with nohup) are found by scanning running
 python processes for the script name: they are shown, can be stopped, and block
@@ -31,6 +36,7 @@ from __future__ import annotations
 import argparse
 import curses
 import fcntl
+import getpass
 import json
 import locale
 import multiprocessing
@@ -73,6 +79,7 @@ class Service:
     log: str                        # relative to BACKEND_DIR; output is appended
     settings: dict = field(default_factory=dict)   # keyword arguments for run()
     run_now: bool = False           # has a scheduled job that "run now" can start early
+    one_shot: bool = False          # runs once with settings given at start; never restarted
 
     @property
     def script_path(self) -> Path:
@@ -115,6 +122,13 @@ SERVICES: tuple[Service, ...] = (
         "water_pumping/schedule_pump.py",
         "water_pumping/schedule_pump.log",
         run_now=True,
+    ),
+    Service(
+        "ota",
+        "Firmware update",
+        "master/ota_update.py",
+        "master/ota_update.log",
+        one_shot=True,
     ),
 )
 KEYS = {svc.key: idx for idx, svc in enumerate(SERVICES)}
@@ -229,6 +243,7 @@ class Unit:
         self.last_exit = ""
         self.last_error = ""
         self.info: dict = {}            # status fields reported by the service
+        self.run_settings: dict = {}    # settings given with the start request (in memory only)
 
 
 class Daemon:
@@ -259,7 +274,7 @@ class Daemon:
         if command == "status":
             return self.status()
         if command == "start":
-            return self.start(indices)
+            return self.start(indices, request.get("settings") or {})
         if command == "stop":
             return self.stop(indices)
         if command == "run-now":
@@ -292,7 +307,7 @@ class Daemon:
                   "shutting_down": self.shutting_down}
         return {"ok": True, "daemon": daemon, "services": services}
 
-    def start(self, indices: list[int]) -> dict:
+    def start(self, indices: list[int], settings: dict) -> dict:
         if self.shutting_down:
             return {"ok": False, "error": "the manager is shutting down"}
         self.scan()
@@ -308,6 +323,7 @@ class Daemon:
             else:
                 self.next_start = max(now, self.next_start)
                 unit.state = "starting"
+                unit.run_settings = dict(settings.get(unit.svc.key) or {})
                 unit.start_at = self.next_start
                 unit.restart_delay = RESTART_DELAY_MIN_S
                 self.next_start += START_GAP_S
@@ -378,6 +394,7 @@ class Daemon:
     def stop_unit(self, unit: Unit) -> bool:
         if unit.state in ("starting", "restarting"):
             unit.state = "stopped"      # cancel the queued start
+            unit.run_settings = {}
             return True
         if unit.state == "running":
             self.send(unit, "stop")
@@ -398,7 +415,8 @@ class Daemon:
         parent, child = self.mp.Pipe()
         proc = self.mp.Process(
             target=service_runtime.child_main,
-            args=(str(unit.svc.script_path), str(unit.svc.log_path), dict(unit.svc.settings), child),
+            args=(str(unit.svc.script_path), str(unit.svc.log_path),
+                  {**unit.svc.settings, **unit.run_settings}, child),
             name=f"service-{unit.svc.key}",
         )
         try:
@@ -414,6 +432,8 @@ class Daemon:
         unit.state = "running"
         unit.started_at = time.time()
         unit.info = {}
+        if unit.svc.one_shot:
+            unit.last_error = ""        # from an earlier run
         log(f"{unit.svc.name} started (pid {proc.pid})")
 
     def receive(self, unit: Unit) -> None:
@@ -454,19 +474,22 @@ class Daemon:
             log(f"{unit.svc.name} {unit.last_exit}")
         elif code == 0:
             unit.state = "stopped"
-            unit.last_exit = f"finished on its own {stamp()}"
+            unit.last_exit = f"finished{'' if unit.svc.one_shot else ' on its own'} {stamp()}"
             log(f"{unit.svc.name} {unit.last_exit}")
         else:
             reason = f"exit code {code}" if code > 0 else f"killed by {signal.Signals(-code).name}"
             if ran_for >= STABLE_RUN_S:
                 unit.restart_delay = RESTART_DELAY_MIN_S
-            self.crashed(unit, f"crashed {stamp()} ({reason})")
+            self.crashed(unit, f"{'failed' if unit.svc.one_shot else 'crashed'} {stamp()} ({reason})")
+        if unit.state == "stopped":
+            unit.run_settings = {}
 
     def crashed(self, unit: Unit, why: str) -> None:
         unit.last_exit = why
-        if self.shutting_down:
+        if self.shutting_down or unit.svc.one_shot:
             unit.state = "stopped"
-            log(f"{unit.svc.name} {why}")
+            unit.run_settings = {}
+            log(f"{unit.svc.name} {why}" + (f" ({unit.last_error})" if unit.last_error else ""))
             return
         unit.restarts += 1
         unit.state = "restarting"
@@ -548,9 +571,15 @@ def run_daemon() -> int:
 
 # --- Client ------------------------------------------------------------------
 
-def call(command: str, services: list[str] | tuple[str, ...] = ()) -> dict:
-    """Send one request to the daemon; raises OSError if it is not running."""
-    payload = json.dumps({"cmd": command, "services": list(services)}).encode() + b"\n"
+def call(command: str, services: list[str] | tuple[str, ...] = (), settings: dict | None = None) -> dict:
+    """Send one request to the daemon; raises OSError if it is not running.
+
+    settings: {service key: run() keyword arguments} for a start request.
+    """
+    request = {"cmd": command, "services": list(services)}
+    if settings:
+        request["settings"] = settings
+    payload = json.dumps(request).encode() + b"\n"
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(10)
         sock.connect(str(SOCKET_PATH))
@@ -613,6 +642,8 @@ def describe(st: dict) -> tuple[str, str]:
         return f"◌ stopping   pid {st['pid']}", "warn"
     if state == "restarting":
         return f"✖ crashed    restart #{st['restarts']} in {format_duration(st['start_in'])}", "bad"
+    if st["key"] in KEYS and SERVICES[KEYS[st["key"]]].one_shot:
+        return "○ idle", ""
     return "○ stopped", "bad"
 
 
@@ -631,6 +662,42 @@ def detail_lines(st: dict) -> list[tuple[str, str, str]]:
     if st["last_error"]:
         lines.append(("last error", st["last_error"], "bad"))
     return lines
+
+
+def ask_ota_settings(ask, nodes: str | None = None, ssid: str | None = None,
+                     url: str | None = None) -> dict | None:
+    """Ask for the settings of a firmware update; None if the user cancelled.
+
+    ask(label, secret) returns the answer, or None on cancel. Answers given as
+    arguments are not asked again. Raises ValueError on an unusable answer.
+    """
+    if nodes is None:
+        nodes = ask("Nodes (comma-separated IDs, empty = all from .env)", False)
+        if nodes is None:
+            return None
+    try:
+        node_list = [int(n) for n in nodes.replace(" ", "").split(",") if n]
+    except ValueError:
+        raise ValueError(f"Not a list of node IDs: {nodes!r}") from None
+    if ssid is None:
+        ssid = ask("WiFi SSID", False)
+        if ssid is None:
+            return None
+    if not ssid:
+        raise ValueError("The nodes need a WiFi SSID to download the firmware.")
+    password = ask("WiFi password (empty = open network)", True)
+    if password is None:
+        return None
+    if url is None:
+        url = ask("Firmware URL (empty = OTA_URL from .env)", False)
+        if url is None:
+            return None
+    settings = {"ssid": ssid, "password": password}
+    if node_list:
+        settings["nodes"] = node_list
+    if url:
+        settings["url"] = url
+    return settings
 
 
 # --- Log tail ----------------------------------------------------------------
@@ -667,6 +734,10 @@ class Tui:
         self.status: dict | None = None
 
         curses.curs_set(0)
+        try:
+            curses.set_escdelay(25)     # Esc cancels a prompt without the default 1s delay
+        except AttributeError:
+            pass
         screen.keypad(True)
         screen.timeout(REFRESH_MS)
         self.colors = {"": 0, "ok": 0, "bad": 0, "warn": 0, "dim": curses.A_DIM}
@@ -685,9 +756,9 @@ class Tui:
 
     # -- helpers --
 
-    def call(self, command: str, indices: list[int] = ()) -> dict | None:
+    def call(self, command: str, indices: list[int] = (), settings: dict | None = None) -> dict | None:
         try:
-            response = call(command, [SERVICES[i].key for i in indices])
+            response = call(command, [SERVICES[i].key for i in indices], settings)
         except OSError:
             self.status = None
             self.message = f"The manager daemon is not reachable; see {DAEMON_LOG.name}."
@@ -769,7 +840,8 @@ class Tui:
         if self.message:
             self.put(height - 3, 1, self.message, self.colors["warn"] | bold)
         self.put(height - 2, 1, f"↑/↓ move   space select   a select all/none   1-{len(SERVICES)} jump", dim)
-        self.put(height - 1, 1, "s start   x stop   n run now   q quit (services keep running)", dim)
+        self.put(height - 1, 1, "s start (firmware update asks for WiFi)   x stop   n run now   "
+                                "q quit (services keep running)", dim)
         self.screen.refresh()
 
     def show_message(self, text: str) -> None:
@@ -785,15 +857,59 @@ class Tui:
             self.screen.timeout(REFRESH_MS)
         return key in (ord("y"), ord("Y"))
 
+    def prompt(self, label: str, secret: bool = False) -> str | None:
+        """Read a line on the message row; None if Esc was pressed."""
+        text = ""
+        self.screen.timeout(-1)
+        try:
+            curses.curs_set(1)
+        except curses.error:
+            pass
+        try:
+            while True:
+                shown = "*" * len(text) if secret else text
+                self.show_message(f"{label}: {shown}")
+                try:
+                    key = self.screen.get_wch()
+                except curses.error:
+                    continue
+                if key in ("\n", "\r", curses.KEY_ENTER):
+                    return text
+                if key == "\x1b":
+                    return None
+                if key in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+                    text = text[:-1]
+                elif isinstance(key, str) and key.isprintable():
+                    text += key
+        finally:
+            self.screen.timeout(REFRESH_MS)
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+
     # -- actions --
 
     def start_selected(self) -> None:
+        targets = self.targets()
+        settings = {}
+        if KEYS["ota"] in targets:
+            try:
+                ota = ask_ota_settings(lambda label, secret: self.prompt(label, secret))
+            except ValueError as error:
+                self.message = str(error)
+                return
+            nodes = ", ".join(map(str, ota["nodes"])) if ota and "nodes" in ota else "all nodes"
+            if ota is None or not self.confirm(f"Update the firmware of {nodes} via WiFi '{ota['ssid']}'?"):
+                self.message = "Firmware update cancelled."
+                return
+            settings["ota"] = ota
         try:
             ensure_daemon()
         except RuntimeError as error:
             self.message = str(error)
             return
-        response = self.call("start", self.targets())
+        response = self.call("start", targets, settings)
         self.selected.clear()
         if response is None:
             return
@@ -973,6 +1089,59 @@ def stop_outside_manager(indices: list[int]) -> int:
     return 0
 
 
+def start_ota(nodes: str | None, ssid: str | None, url: str | None, md5_check: bool) -> int:
+    """Ask for the update settings, start the update and follow it until it ends."""
+    def ask(label: str, secret: bool) -> str | None:
+        try:
+            return getpass.getpass(f"{label}: ") if secret else input(f"{label}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+
+    try:
+        settings = ask_ota_settings(ask, nodes, ssid, url)
+    except ValueError as error:
+        print(error)
+        return 1
+    if settings is None:
+        print("Firmware update cancelled.")
+        return 1
+    if not md5_check:
+        settings["md5_check"] = False
+    ensure_daemon()
+    response = call("start", ["ota"], {"ota": settings})
+    if not response["ok"]:
+        print(response["error"])
+        return 1
+    if not response["started"]:
+        reasons = response["refused"] or ["a firmware update is already running"]
+        print(f"Not started: {'; '.join(reasons)}")
+        return 1
+    print("Firmware update started (Ctrl+C stops following; the update keeps running).")
+    shown = None
+    try:
+        while True:
+            time.sleep(1)
+            st = service_states(call("status"))[KEYS["ota"]]
+            if st is None:
+                continue
+            activity = st["info"].get("activity")
+            if activity and activity != shown and st["state"] == "running":
+                print(f"  {activity}")
+                shown = activity
+            if st["state"] == "stopped":
+                break
+    except KeyboardInterrupt:
+        print("\nStopped following. `manage_services.py stop ota` aborts the update.")
+        return 0
+    for line in str(st["info"].get("last_result", "")).split(" | "):
+        if line:
+            print(f"  node {line}")
+    print(f"Firmware update {st['last_exit']}" + (f": {st['last_error']}" if st["last_error"] else ""))
+    print(f"Log: {SERVICES[KEYS['ota']].log_path}")
+    return 0 if st["last_exit"].startswith("finished") else 1
+
+
 def run_now(keys: list[str]) -> int:
     try:
         response = call("run-now", keys)
@@ -1009,16 +1178,23 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run, watch and control the backend background services.")
     parser.add_argument("command", nargs="?", default="tui",
                         choices=("tui", "status", "start", "stop", "run-now", "start-all", "stop-all",
-                                 "shutdown", "daemon"),
+                                 "ota", "shutdown", "daemon"),
                         help="default: interactive terminal UI")
     parser.add_argument("services", nargs="*", metavar="service",
                         help=f"for start, stop and run-now: {', '.join(KEYS)}")
+    ota = parser.add_argument_group("firmware update (ota); what is not given is asked for")
+    ota.add_argument("--nodes", help="comma-separated node IDs (default: all from .env)")
+    ota.add_argument("--ssid", help="WiFi the nodes join for the download (the password is always asked)")
+    ota.add_argument("--url", help="firmware URL (default: OTA_URL from .env)")
+    ota.add_argument("--no-md5", action="store_true", help="don't check the download on this machine first")
     args = parser.parse_args()
     unknown = [key for key in args.services if key not in KEYS]
     if unknown:
         parser.error(f"unknown service {', '.join(unknown)} (choose from {', '.join(KEYS)})")
     if args.command in ("start", "stop", "run-now") and not args.services:
         parser.error(f"{args.command} needs at least one service: {', '.join(KEYS)}")
+    if args.command == "start" and "ota" in args.services:
+        parser.error("start a firmware update with: manage_services.py ota")
 
     try:
         if args.command == "daemon":
@@ -1027,7 +1203,9 @@ def main() -> int:
             print_status()
             return 0
         if args.command in ("start", "start-all"):
-            return start_services(args.services or list(KEYS))
+            return start_services(args.services or [svc.key for svc in SERVICES if not svc.one_shot])
+        if args.command == "ota":
+            return start_ota(args.nodes, args.ssid, args.url, not args.no_md5)
         if args.command in ("stop", "stop-all"):
             return stop_services(args.services or list(KEYS))
         if args.command == "run-now":
