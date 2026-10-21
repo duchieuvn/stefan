@@ -130,6 +130,14 @@ Run everything from inside `app/` (paths such as `.env`, `sequence_cache/` and
   (`IntervalLoader`), the temporal solver (`solve_temporal`),
   `compute_temporal_sequence` and the on-disk cache helpers.
 - `rti_temporal_visualization.py` — Matplotlib drawing for the 4-panel figure (no Tk).
+- `weather.py` — daily temperature, precipitation and relative humidity from
+  the DWD Climate Data Center (opendata.dwd.de, no API key) for the station
+  `weather_dwd_station` in `config.py` (default 00151 Amberg-Unterammersricht):
+  hourly `recent` files (~500 days up to yesterday), `historical` files for
+  older days and the 10-minute `now` files for today. DWD timestamps are UTC;
+  they are converted to local time and aggregated over the map time window
+  (`cur_start_hhmm`–`cur_end_hhmm`). Fetched in the background by `main.py` and
+  drawn as a third figure row below the time series.
 - `database.py` — `.env` settings, SQLite / PostgreSQL providers
   (`open_database()`, `default_backend()`), and the SFTP sync of the local
   `reduced_data_*.db` (used only by the `sqlite` fallback backend).

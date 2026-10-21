@@ -62,6 +62,10 @@ class RTIConfig:
         8: (1.245, 2.720),
     })
 
+    # DWD Climate Data Center station for the weather panels (5-digit Stations_ID).
+    # 00151 = Amberg-Unterammersricht (3 km from Amberg). None = no weather is fetched.
+    weather_dwd_station: str | None = "00151"
+
     def __post_init__(self) -> None:
         if self.weight_mode not in WEIGHT_MODES:
             raise ValueError(f"Unbekannter weight_mode: {self.weight_mode}")

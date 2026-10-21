@@ -5,7 +5,8 @@ Dynamische RTI aus sensor_data.db mit räumlicher + zeitlicher Regularisierung.
 Tk viewer for the sequences pre-computed by `precompute_sequences.py`
 (numerics in `rti_temporal_core`, drawing in `rti_temporal_visualization`).
 The "Daten" menu selects the data source and history period and re-runs
-the pre-computation in the background.
+the pre-computation in the background. Weather for the cached period is
+fetched from the DWD Climate Data Center in the background (`weather`).
 """
 
 from __future__ import annotations
@@ -39,10 +40,12 @@ import precompute_sequences
 from config import DEFAULT_CONFIG, RTIConfig
 from database import BACKENDS, SettingsError, default_backend
 from rti_temporal_visualization import clear_figure, create_temporal_figure, draw_temporal_sequence_view
+from weather import DailyWeather, WeatherError, fetch_daily_weather, station_is_set
 
 LOAD_DELAY_MS = 160
 DISPLAY_DELAY_MS = 40
 PRECOMPUTE_POLL_MS = 200
+WEATHER_POLL_MS = 200
 
 # "Daten" menu choices: label -> backend / history_months (None = all data).
 SOURCE_LABELS = {
@@ -85,6 +88,9 @@ class RTITemporalSliderApp:
         self.closing = False
         self.precompute_thread: threading.Thread | None = None
         self.precompute_errors: list[Exception] = []
+        self.weather: DailyWeather | None = None
+        self.weather_note = ""  # shown in the weather panels while `weather` is None
+        self.weather_request = 0  # increases per fetch; results of older fetches are dropped
 
         logging.info("Building RTI model context...")
         self.context = build_model_context(config)
@@ -244,6 +250,7 @@ class RTITemporalSliderApp:
         self._update_cache_info()
 
         if ref_dates:
+            self._start_weather_fetch()
             self._debounce("load", 0, self._load_sequence)
         else:
             clear_figure(self.figure)
@@ -288,6 +295,8 @@ class RTITemporalSliderApp:
         ref_date = self.ref_dates[self.ref_index]
         logging.info("Forcing reload of %s.", ref_date)
         self.loaded.pop(ref_date, None)
+        if self.weather is None:  # retry a failed weather fetch
+            self._start_weather_fetch()
         self._debounce("load", 0, self._load_sequence)
 
     # ------------------------------------------------------------------
@@ -335,6 +344,47 @@ class RTITemporalSliderApp:
             error = self.precompute_errors[0]
             self.info_var.set(f"Vorberechnung fehlgeschlagen: {error}")
             messagebox.showerror("Fehler", f"Vorberechnung fehlgeschlagen:\n{error}", parent=self.root)
+
+    # ------------------------------------------------------------------
+    # Weather (DWD Climate Data Center)
+    # ------------------------------------------------------------------
+
+    def _start_weather_fetch(self) -> None:
+        """Fetches the weather for the cached date range in a background thread."""
+        self.weather = None
+        self.weather_request += 1
+        if not station_is_set(self.config):
+            self.weather_note = "Keine DWD-Station gesetzt\n(weather_dwd_station in config.py)"
+            return
+        self.weather_note = "Lade Wetterdaten ..."
+        config, request = self.config, self.weather_request
+        start_date, end_date = self.ref_dates[0], self.ref_dates[-1]
+        outcome: dict[str, object] = {}
+
+        def worker() -> None:
+            try:
+                outcome["weather"] = fetch_daily_weather(config, start_date, end_date)
+            except WeatherError as error:  # offline or rejected request: no traceback
+                logging.warning("Weather unavailable: %s", error)
+                outcome["error"] = error
+            except Exception as error:
+                logging.exception("Failed to fetch weather.")
+                outcome["error"] = error
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        self.root.after(WEATHER_POLL_MS, self._poll_weather, thread, request, outcome)
+
+    def _poll_weather(self, thread: threading.Thread, request: int, outcome: dict[str, object]) -> None:
+        if self.closing or request != self.weather_request:
+            return
+        if thread.is_alive():
+            self.root.after(WEATHER_POLL_MS, self._poll_weather, thread, request, outcome)
+            return
+        self.weather = outcome.get("weather")
+        if self.weather is None:
+            self.weather_note = f"Wetterdaten nicht verfügbar:\n{outcome['error']}"
+        self._debounce("display", 0, self._draw)
 
     # ------------------------------------------------------------------
     # Scheduling / close
@@ -425,7 +475,7 @@ class RTITemporalSliderApp:
             f"mittlere rekonstruierte Δ-Dämpfung={float(result.mean_change[idx]):.3f} dB | "
             f"Kartenwerte ΔDämpfung [{result.raw_min:.3f}, {result.raw_max:.3f}] dB"
         )
-        draw_temporal_sequence_view(self.figure, self.context, result, idx)
+        draw_temporal_sequence_view(self.figure, self.context, result, idx, self.weather, self.weather_note)
         self.canvas.draw_idle()
 
 
