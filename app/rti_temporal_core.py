@@ -18,6 +18,7 @@ import os
 for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
     os.environ.setdefault(_var, "1")
 
+import json
 import logging
 import math
 from collections import defaultdict
@@ -850,10 +851,28 @@ def cached_dates(config: RTIConfig) -> list[str]:
     return sorted(p.stem for p in config.sequence_cache_dir.glob("????-??-??.joblib"))
 
 
-def cache_is_current(config: RTIConfig) -> bool:
-    """True if the newest cached sequence is for today's date."""
+CACHE_INFO_FILE = "cache_info.json"
+
+
+def save_cache_info(config: RTIConfig, backend: str) -> None:
+    """Records which data source and history period the cached sequences were built from."""
+    path = config.sequence_cache_dir / CACHE_INFO_FILE
+    path.write_text(json.dumps({"backend": backend, "history_months": config.history_months}))
+
+
+def load_cache_info(config: RTIConfig) -> dict[str, Any] | None:
+    try:
+        return json.loads((config.sequence_cache_dir / CACHE_INFO_FILE).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def cache_is_current(config: RTIConfig, backend: str) -> bool:
+    """True if the newest cached sequence is for today's date and was built from
+    `backend` with `config.history_months`."""
     dates = cached_dates(config)
-    return bool(dates) and dates[-1] == date.today().isoformat()
+    info = {"backend": backend, "history_months": config.history_months}
+    return bool(dates) and dates[-1] == date.today().isoformat() and load_cache_info(config) == info
 
 
 def load_cached_sequence(config: RTIConfig, ref_date: str) -> RTISequenceResult:

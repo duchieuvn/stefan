@@ -27,19 +27,20 @@ from rti_temporal_core import (
     build_model_context,
     compute_temporal_sequence,
     prune_cache,
+    save_cache_info,
     save_cached_sequence,
     setup_logging,
 )
 
 
-def precompute_all(config: RTIConfig, database: DatabaseProvider) -> None:
-    """Computes and saves the sequence for every reference date."""
+def precompute_all(config: RTIConfig, database: DatabaseProvider) -> bool:
+    """Computes and saves the sequence for every reference date; False if there was no data."""
     # Daily intervals are reused across all reference sequences.
     loader = IntervalLoader(database, config)
     dates = loader.available_dates()
     if not dates:
         logging.error("No usable dates found in the database. Aborting.")
-        return
+        return False
 
     logging.info("Found %d dates to process (%s … %s). Building RTI model context...", len(dates), dates[0], dates[-1])
     context = build_model_context(config)
@@ -56,6 +57,7 @@ def precompute_all(config: RTIConfig, database: DatabaseProvider) -> None:
     if stale:
         logging.info("Removed %d stale cache files (%s … %s).", len(stale), stale[0], stale[-1])
     logging.info("Pre-computation finished.")
+    return True
 
 
 def run(config: RTIConfig = DEFAULT_CONFIG, backend: str | None = None) -> None:
@@ -70,7 +72,8 @@ def run(config: RTIConfig = DEFAULT_CONFIG, backend: str | None = None) -> None:
     logging.info("Using %s backend.", backend)
     database = open_database(backend, config.db_path)
     try:
-        precompute_all(config, database)
+        if precompute_all(config, database):
+            save_cache_info(config, backend)
     finally:
         database.close()
 
