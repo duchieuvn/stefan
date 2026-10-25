@@ -1,4 +1,4 @@
-# postgres_schedule
+# postgres_sync
 
 ## sync_scheduled_postgres.py
 
@@ -17,6 +17,9 @@ directory. Progress is printed to the console; redirect it to keep a log.
 # Test the PostgreSQL connection only
 python sync_scheduled_postgres.py --check
 python sync_scheduled_postgres.py --check --source reduced
+
+# Create the profile's database on its server if it doesn't exist yet (setup.sh does this)
+python sync_scheduled_postgres.py --create-database
 
 # Copy one batch (up to 1000 rounds + 1000 measurements), main profile, over tailscale (defaults)
 python sync_scheduled_postgres.py --once
@@ -38,3 +41,15 @@ nohup python sync_scheduled_postgres.py --source reduced > reduced_schedule.log 
 ```
 
 `--help` lists all flags.
+
+## The target database
+
+Each machine syncs into its own database on the PostgreSQL server (e.g.
+`sensor_data_site2` on `100.100.51.120`): two machines in one database would skip each
+other's rows, because their ids overlap. `backend/setup.sh` creates it with
+`--create-database`.
+
+The sync creates its tables itself (`create_postgres_schema`) and fills them from SQLite,
+so a new, empty database fills itself on the next run. Schema changes go into
+`create_postgres_schema` and must be additive (`ADD COLUMN IF NOT EXISTS`), because
+existing databases are never recreated.

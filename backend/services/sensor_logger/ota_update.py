@@ -33,7 +33,7 @@ from pathlib import Path
 from pymodbus.client import ModbusSerialClient
 from pymodbus.exceptions import ModbusException
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # backend/, for service_runtime
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "manager"))  # for service_runtime
 from service_runtime import ServiceContext
 
 from config import BAUDRATE, CMD_REGISTER, NODES, OTA_NODE_TIMEOUT_S, OTA_PORT, OTA_URL

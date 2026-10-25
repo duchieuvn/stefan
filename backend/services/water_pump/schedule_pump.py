@@ -6,7 +6,7 @@ from pathlib import Path
 
 import schedule
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # backend/, for service_runtime
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "manager"))  # for service_runtime
 from service_runtime import ServiceContext
 from pump_water import run_pump_cycles
 

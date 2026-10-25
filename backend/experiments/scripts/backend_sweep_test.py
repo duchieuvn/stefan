@@ -9,8 +9,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
-ROOT = Path(__file__).resolve().parent.parent   # backend/
-
 
 # =========================
 # CONFIG (adjust as needed!)
@@ -18,11 +16,11 @@ ROOT = Path(__file__).resolve().parent.parent   # backend/
 # Node bus is on the FTDI adapter; by-id path survives ttyUSB renumbering
 PORT = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A5069RR4-if00-port0"
 BAUDRATE = 9600
-DB_PATH = ROOT / "data/power_sweep/power_data_sweep.db"   # separate DB, so manual lora_logger_03 runs don't get mixed in
+DB_PATH = "sensor_data_sweep.db"   # separate DB, so manual lora_logger_03 runs don't get mixed in
 
 # In addition to the SQLite DB, a separate CSV file is written per
 # configuration (for tools/colleagues without SQL, and for analyze_sweep_duty_cycle.py).
-CSV_OUT_DIR = ROOT / "data/power_sweep/runs_power_csv"
+CSV_OUT_DIR = Path(__file__).resolve().parents[1] / "results" / "runs_csv"
 MANIFEST_CSV_PATH = CSV_OUT_DIR / "runs_manifest.csv"
 
 NODES = [1, 2, 3, 4, 5, 6, 7, 8]

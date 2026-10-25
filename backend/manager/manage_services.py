@@ -55,11 +55,12 @@ from pathlib import Path
 
 import service_runtime
 
-BACKEND_DIR = Path(__file__).resolve().parent
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+LOG_DIR = BACKEND_DIR / "logs"
 PYTHON = os.environ.get("SERVICES_PYTHON", sys.executable)
 SOCKET_PATH = BACKEND_DIR / "manage_services.sock"
 PID_PATH = BACKEND_DIR / "manage_services.pid"
-DAEMON_LOG = BACKEND_DIR / "manage_services.log"
+DAEMON_LOG = LOG_DIR / "manage_services.log"
 
 START_GAP_S = 2.0            # pause between starts when starting several services
 STOP_GRACE_S = 15.0          # after a stop request, wait this long before SIGTERM
@@ -95,8 +96,8 @@ SERVICES: tuple[Service, ...] = (
     Service(
         "sensor",
         "Sensor data logger",
-        "master/main_senor_data.py",
-        "master/main_senor_data.log",
+        "services/sensor_logger/main_senor_data.py",
+        "logs/main_senor_data.log",
         # Don't rewrite the nodes' LoRa settings; read them from the first node
         # (defaults if that fails) instead of asking on the terminal.
         settings={"lora": "read"},
@@ -104,30 +105,30 @@ SERVICES: tuple[Service, ...] = (
     Service(
         "sync",
         "Postgres sync",
-        "postgres_schedule/sync_scheduled_postgres.py",
-        "postgres_schedule/schedule_postgres.log",
+        "services/postgres_sync/sync_scheduled_postgres.py",
+        "logs/schedule_postgres.log",
         settings={"interval_seconds": 900},
         run_now=True,
     ),
     Service(
         "reduce",
         "Reduce SQLite",
-        "reduce_sqlite/scheduled_reduce_database.py",
-        "reduce_sqlite/schedule_reduce.log",
+        "services/sqlite_reduce/scheduled_reduce_database.py",
+        "logs/schedule_reduce.log",
         run_now=True,
     ),
     Service(
         "pump",
         "Water pump",
-        "water_pumping/schedule_pump.py",
-        "water_pumping/schedule_pump.log",
+        "services/water_pump/schedule_pump.py",
+        "logs/schedule_pump.log",
         run_now=True,
     ),
     Service(
         "ota",
         "Firmware update",
-        "master/ota_update.py",
-        "master/ota_update.log",
+        "services/sensor_logger/ota_update.py",
+        "logs/ota_update.log",
         one_shot=True,
     ),
 )
@@ -600,6 +601,7 @@ def ensure_daemon() -> None:
         return
     except OSError:
         pass
+    LOG_DIR.mkdir(exist_ok=True)
     with open(DAEMON_LOG, "ab") as daemon_log:
         subprocess.Popen(
             [PYTHON, "-u", str(Path(__file__).resolve()), "daemon"],

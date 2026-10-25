@@ -22,8 +22,10 @@ from pathlib import Path
 
 import psycopg2  # currently only works with psycopg2 2.9.10
 from dotenv import load_dotenv
+from psycopg2 import sql
+from psycopg2.extras import execute_values
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # backend/, for service_runtime
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "manager"))  # for service_runtime
 from service_runtime import ServiceContext
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"
@@ -134,6 +136,22 @@ def connect_postgres(dsn: str) -> psycopg2.extensions.connection:
     )
 
 
+def create_database(dsn: str) -> None:
+    """Create the DSN's database on its server unless it exists (needs the CREATEDB right)."""
+    name = psycopg2.extensions.parse_dsn(dsn)["dbname"]
+    # Log in to the server's maintenance database: the target one may not exist yet.
+    with closing(psycopg2.connect(dsn, dbname="postgres",
+                                  connect_timeout=POSTGRES_CONNECT_TIMEOUT_SECONDS)) as pg:
+        pg.autocommit = True  # CREATE DATABASE can't run inside a transaction
+        with pg.cursor() as cursor:
+            cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,))
+            if cursor.fetchone():
+                log(f"Database {name} already exists")
+                return
+            cursor.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    log(f"Created database {name}")
+
+
 def create_postgres_schema(pg: psycopg2.extensions.connection) -> None:
     """Create the destination tables when running against an empty database."""
     with pg, pg.cursor() as cursor:
@@ -178,11 +196,14 @@ def copy_batch(
 
     inserted = 0
     if rows:
-        placeholders = ", ".join(["%s"] * len(columns))
         with pg, pg.cursor() as cursor:  # one transaction: commit on success, rollback on error
-            cursor.executemany(
-                f"INSERT INTO {table} ({column_list}) VALUES ({placeholders}) ON CONFLICT DO NOTHING",
+            # One INSERT for the whole batch (executemany sends one per row), so rowcount
+            # counts the whole batch too.
+            execute_values(
+                cursor,
+                f"INSERT INTO {table} ({column_list}) VALUES %s ON CONFLICT DO NOTHING",
                 rows,
+                page_size=len(rows),
             )
             inserted = cursor.rowcount
 
@@ -288,11 +309,22 @@ def main() -> None:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true", help="Copy one batch and exit")
     mode.add_argument("--check", action="store_true", help="Only test the PostgreSQL connection")
+    mode.add_argument("--create-database", action="store_true",
+                      help="Create the profile's PostgreSQL database if it doesn't exist, and exit")
     parser.add_argument("--interval-seconds", type=int, default=DEFAULT_INTERVAL_SECONDS,
                         help="Interval between scheduled runs (default: %(default)s)")
     args = parser.parse_args()
     if args.interval_seconds <= 0:
         parser.error("--interval-seconds must be greater than 0")
+
+    if args.create_database:
+        _, dsn = profile(args.source, args.connection)
+        create_database(dsn)
+        # Tables and indexes too (all IF NOT EXISTS), so the database is complete before the
+        # first sync and an existing one gets any index added later.
+        with closing(connect_postgres(dsn)) as pg:
+            create_postgres_schema(pg)
+        return
 
     if args.check or args.once:
         sqlite_path, dsn = profile(args.source, args.connection)

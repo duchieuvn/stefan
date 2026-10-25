@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 # =========================
 # CONFIG (adjust as needed!)
 # =========================
-CSV_DIR = Path("runs_csv")                              # written by lora_logger_sweep.py
+CSV_DIR = Path(__file__).resolve().parents[1] / "results" / "runs_csv"                              # written by lora_logger_sweep.py
 OUT_SUMMARY_PATH = CSV_DIR / "duty_cycle_summary.csv"
 OUT_LINKS_PATH = CSV_DIR / "link_stats.csv"   # per (config, sender, receiver)
 
@@ -24,7 +24,7 @@ ASSUMED_PREAMBLE_LEN = 8
 ASSUMED_CRC_ENABLED = True
 ASSUMED_EXPLICIT_HEADER = True
 
-STAT_PY_PATH = Path("stat.py")
+STAT_PY_PATH = Path(__file__).resolve().parent / "stat.py"
 
 
 def _load_stat_module():

@@ -1,7 +1,7 @@
 import math
 import sys
 
-import backend.experiments.config as cfg_module
+import config as cfg_module
 
 # ----------------------------------------------------------------------
 # 1. READ FUNCTION

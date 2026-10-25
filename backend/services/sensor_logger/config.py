@@ -1,4 +1,4 @@
-"""Settings for backend/master, loaded from backend/master/.env (falls back to .env.test)."""
+"""Settings for backend/services/sensor_logger, loaded from its .env (falls back to .env.test)."""
 import os
 from pathlib import Path
 
@@ -12,7 +12,7 @@ env = os.environ
 # Serial / storage
 PORT = env["PORT"]
 BAUDRATE = int(env["BAUDRATE"])
-DATA_DIR = MASTER_DIR.parent / env["DATA_DIR"]   # relative to backend/
+DATA_DIR = MASTER_DIR.parents[1] / env["DATA_DIR"]   # relative to backend/
 DB_PATH = str(DATA_DIR / env["DB_FILENAME"])
 
 NODES = [int(n) for n in env["NODES"].split(",")]

@@ -1,0 +1,48 @@
+# A fresh Ubuntu machine to try backend/setup.sh on, without touching a real one.
+#
+#   docker build -f backend/Dockerfile.test -t stefan-setup-test backend
+#
+# setup.sh needs a PostgreSQL server to create its database on. For a throwaway one:
+#
+#   docker network create stefan-test
+#   docker run -d --name stefan-pg --network stefan-test \
+#       -e POSTGRES_USER=holzofen -e POSTGRES_PASSWORD=secret postgres:16
+#
+# Run the setup (no questions; leave DB_NAME and DB_PASSWORD out to be asked, with -it):
+#
+#   docker run --rm -it --network stefan-test \
+#       -e DB_SERVER=stefan-pg:5432 -e DB_NAME=sensor_data_test -e DB_PASSWORD=secret \
+#       stefan-setup-test
+#
+# To look around afterwards, or to run setup.sh again by hand (it must then change nothing):
+#
+#   docker run --rm -it ... stefan-setup-test bash
+#
+# What is real: apt, the sudo/usermod step, the Miniforge download and the conda env, the
+# generated .env files, the database on the server, the crontab line, the manager and the
+# services. What is not: tailscale (a stub below, the PostgreSQL server is reached over the
+# docker network instead), serial ports (the sensor and pump services crash-loop, as they
+# do on any machine without the hardware), and reboots (the container has no cron daemon).
+FROM ubuntu:24.04
+
+# What a fresh server already has. Everything else (sqlite3, git, curl, conda, ...) is
+# installed by setup.sh itself.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends sudo cron ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Stand-in for tailscale: reports "connected" with a made-up address.
+RUN printf '%s\n' '#!/bin/sh' \
+        'case "$1" in ip) echo 100.64.0.1 ;; esac' \
+        'exit 0' > /usr/local/bin/tailscale \
+    && chmod +x /usr/local/bin/tailscale
+
+# setup.sh must not run as root; the user that runs the services has sudo.
+RUN useradd -m -s /bin/bash tester \
+    && echo 'tester ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/tester
+USER tester
+WORKDIR /home/tester/stefan
+
+# Config and data stay out (see backend/.dockerignore): setup.sh must create them.
+COPY --chown=tester:tester . backend/
+

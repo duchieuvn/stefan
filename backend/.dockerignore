@@ -1,0 +1,9 @@
+# Keep config, data and runtime files out of the image, so setup.sh starts from scratch
+# and no password reaches it.
+**/.env
+data
+experiments
+**/__pycache__
+**/*.log
+**/*.pid
+**/*.sock

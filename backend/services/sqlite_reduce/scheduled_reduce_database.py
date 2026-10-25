@@ -11,7 +11,7 @@ try:
 except ImportError:  # Allow this file to be run directly from SOFTWARE/.
     import reduce_database
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # backend/, for service_runtime
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "manager"))  # for service_runtime
 from service_runtime import ServiceContext
 
 

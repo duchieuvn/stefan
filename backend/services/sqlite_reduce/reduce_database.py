@@ -3,7 +3,7 @@
 import sqlite3
 from pathlib import Path
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"   # backend/data (kernbild_01/data on the Pi)
+DATA_DIR = Path(__file__).resolve().parents[2] / "data"   # backend/data (kernbild_01/data on the Pi)
 SRC = DATA_DIR / "sensor_data.db"
 OUT = DATA_DIR / "reduced_data.db"
 
