@@ -301,7 +301,7 @@ def _run_precompute_with_progress(config: RTIConfig) -> None:
 
     def worker() -> None:
         try:
-            precompute_sequences.run(config.db_path, config)
+            precompute_sequences.precompute_all(config, SQLiteDatabase(config.db_path))
         except Exception as error:
             errors.append(error)
 
@@ -312,6 +312,7 @@ def _run_precompute_with_progress(config: RTIConfig) -> None:
         if thread.is_alive():
             splash.after(200, poll)
         else:
+            progress.stop()
             splash.destroy()
 
     splash.after(200, poll)
