@@ -52,12 +52,6 @@ def init_db(db_path: str) -> None:
             receiver_id INTEGER,
 
             marker INTEGER,
-            payload_len INTEGER,
-            payload_text TEXT,
-
-            trigger_ms REAL,
-            rx_wait_ms REAL,
-            e2e_ms REAL,
 
             ok_match INTEGER,
 
@@ -65,12 +59,7 @@ def init_db(db_path: str) -> None:
             node_timestamp INTEGER,
 
             rssi REAL,
-            snr REAL,
-
-            bme_wait_ms REAL,
-            bme_temp REAL,
-            bme_hum REAL,
-            bme_press REAL
+            snr REAL
         );
     """)
 
@@ -83,8 +72,6 @@ def init_db(db_path: str) -> None:
             duration_s REAL,
 
             nodes_csv TEXT,
-            payload_len INTEGER,
-            payload_text TEXT,
 
             ok_links INTEGER,
             total_links INTEGER,
@@ -114,19 +101,15 @@ def store_measurement(cur: sqlite3.Cursor, row: Dict[str, Any]) -> None:
         INSERT INTO {quote_ident(MEASUREMENT_TABLE)} (
             pc_ts,
             round_id, sender_id, receiver_id,
-            marker, payload_len, payload_text,
-            trigger_ms, rx_wait_ms, e2e_ms,
-            ok_match, rx_id, node_timestamp, rssi, snr,
-            bme_wait_ms, bme_temp, bme_hum, bme_press
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            marker,
+            ok_match, rx_id, node_timestamp, rssi, snr
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
     """, (
         row.get("pc_ts"),
         row.get("round_id"), row.get("sender_id"), row.get("receiver_id"),
-        row.get("marker"), row.get("payload_len"), row.get("payload_text"),
-        row.get("trigger_ms"), row.get("rx_wait_ms"), row.get("e2e_ms"),
+        row.get("marker"),
         row.get("ok_match"), row.get("rx_id"), row.get("node_timestamp"),
         row.get("rssi"), row.get("snr"),
-        row.get("bme_wait_ms"), row.get("bme_temp"), row.get("bme_hum"), row.get("bme_press"),
     ))
 
 
@@ -137,20 +120,18 @@ def store_round(cur: sqlite3.Cursor, info: Dict[str, Any]) -> None:
             pc_start, pc_end, duration_s,
 
             nodes_csv,
-            payload_len, payload_text,
 
             ok_links, total_links, timeouts,
 
             freq_mhz, tx_power, sf, bw_khz, cr_denom, lora_applied,
 
             port, baudrate, measure_interval_s, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
     """, (
         info.get("round_id"),
         info.get("pc_start"), info.get("pc_end"), info.get("duration_s"),
 
         info.get("nodes_csv"),
-        info.get("payload_len"), info.get("payload_text"),
 
         info.get("ok_links"), info.get("total_links"), info.get("timeouts"),
 
@@ -521,11 +502,9 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
         log("")
         log(f"========== ROUND {round_id} START ==========")
 
-    payload_len = None
     for sid in NODES:
         try:
-            plen, _ = write_payload(client, sid, PAYLOAD_TEXT)
-            payload_len = plen
+            write_payload(client, sid, PAYLOAD_TEXT)
         except Exception as e:
             log(f"[Node {sid}] payload write failed: {e}")
 
@@ -564,8 +543,6 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
             t_send0 = time.perf_counter()
             send_tx_cmd(client, sender_id)
             t_send_done = time.perf_counter()
-
-            trigger_ms = (t_send_done - t_send0) * 1000.0
         except Exception as e:
             log(f"[TX Node {sender_id}] TX failed: {e}")
             try:
@@ -638,12 +615,6 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
 
                 # marker-Feld bleibt erhalten, enthält jetzt aber den gesendeten TX-Timestamp
                 "marker": tx_timestamp,
-                "payload_len": payload_len,
-                "payload_text": PAYLOAD_TEXT,
-
-                "trigger_ms": trigger_ms,
-                "rx_wait_ms": rx_wait_ms,
-                "e2e_ms": e2e_ms,
 
                 "ok_match": ok_match,
 
@@ -687,8 +658,6 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
         "duration_s": duration_s,
 
         "nodes_csv": nodes_csv,
-        "payload_len": payload_len,
-        "payload_text": PAYLOAD_TEXT,
 
         "ok_links": ok_links,
         "total_links": total_links,

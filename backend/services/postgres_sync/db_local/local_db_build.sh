@@ -3,7 +3,6 @@ set -e
 
 # Configuration
 POSTGRES_DB="sensor_data"
-DUMP_FILE="../db_container/sensor_data.dump"
 
 # Pre-check if database exists
 echo "Checking if database '$POSTGRES_DB' already exists..."
@@ -32,12 +31,51 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 --dbname="$POSTGRES_DB" <<-EOSQL
     GRANT ALL ON SCHEMA public TO holzofen;
 EOSQL
 
-echo "3. Restoring database from $DUMP_FILE..."
-sudo -u postgres pg_restore \
-    --dbname="$POSTGRES_DB" \
-    --no-owner \
-    --role=holzofen \
-    --verbose "$DUMP_FILE"
+echo "3. Creating tables and indexes..."
+# Mirrors ROUNDS_SCHEMA / MEASUREMENT_SCHEMA in sync_scheduled_postgres.py; keep both in step.
+sudo -u postgres psql -v ON_ERROR_STOP=1 --dbname="$POSTGRES_DB" <<-EOSQL
+    SET ROLE holzofen;
+
+    CREATE TABLE rounds (
+        round_id BIGINT PRIMARY KEY,
+        pc_start TEXT,
+        pc_end TEXT,
+        duration_s DOUBLE PRECISION,
+        nodes_csv TEXT,
+        ok_links BIGINT,
+        total_links BIGINT,
+        timeouts BIGINT,
+        freq_mhz DOUBLE PRECISION,
+        tx_power BIGINT,
+        sf BIGINT,
+        bw_khz BIGINT,
+        cr_denom BIGINT,
+        lora_applied BIGINT,
+        port TEXT,
+        baudrate BIGINT,
+        measure_interval_s DOUBLE PRECISION,
+        notes TEXT
+    );
+
+    CREATE TABLE measurement (
+        id BIGINT PRIMARY KEY,
+        pc_ts TEXT NOT NULL,
+        round_id BIGINT REFERENCES rounds(round_id),
+        sender_id BIGINT,
+        receiver_id BIGINT,
+        marker BIGINT,
+        ok_match BIGINT,
+        rx_id BIGINT,
+        node_timestamp BIGINT,
+        rssi DOUBLE PRECISION,
+        snr DOUBLE PRECISION
+    );
+
+    CREATE INDEX measurement_round_id_idx ON measurement(round_id);
+    -- Covering index for the RTI app's time-range aggregates (index-only scans).
+    CREATE INDEX measurement_pc_ts_idx ON measurement(pc_ts)
+        INCLUDE (sender_id, receiver_id, ok_match, rssi, round_id);
+EOSQL
 
 echo "4. Ensuring final table and sequence permissions..."
 sudo -u postgres psql -v ON_ERROR_STOP=1 --dbname="$POSTGRES_DB" <<-EOSQL
@@ -46,4 +84,4 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 --dbname="$POSTGRES_DB" <<-EOSQL
     ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO holzofen;
 EOSQL
 
-echo "Database restore and user creation complete."
+echo "Database creation complete."
