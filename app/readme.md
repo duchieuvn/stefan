@@ -24,7 +24,7 @@ def compute_temporal_sequence(
 ### Parameters
 
 - `context: RTIModelContext`: An object containing the pre-built RTI model components, such as the grid definition (`nx`, `ny`, `cells`), the `W` matrix (forward model relating cell attenuation to link attenuation), and the `Q` matrix (spatial Laplacian for smoothing). This context is built once and reused. Its `config: RTIConfig` holds all parameters, such as regularization weights (`alpha_ridge`, `alpha_smooth`, `alpha_time`), time window definitions (`ref_start_hhmm`, `cur_start_hhmm`), and display settings.
-- `loader: IntervalLoader`: Loads the aggregated link statistics for a date and time window from the database (`DatabaseProvider`, SQLite or PostgreSQL) and memoizes them, so the same daily interval is never queried twice across reference dates.
+- `loader: IntervalLoader`: Loads the aggregated link statistics for a date and time window from the database (`SQLiteDatabase`) and memoizes them, so the same daily interval is never queried twice across reference dates.
 - `ref_date: str`: The ISO-formatted date string (e.g., "YYYY-MM-DD") that serves as the reference point for all attenuation change calculations. The RTI maps will show changes relative to this day.
 - `sequence_dates: list[str]`: A list of ISO-formatted date strings representing the entire temporal sequence for which RTI maps are to be computed. This list typically includes the `ref_date` itself.
 
@@ -112,17 +112,16 @@ To get updated sequences that include new data, the `precompute_sequences.py` sc
 
 ## Module layout (`app/`)
 
-Run everything from inside `app/` (paths such as `.env`, `sequence_cache/` and
-`reduced_data_*.db` are relative to the working directory).
+Run everything from inside `app/`. On startup `main.py` asks for the path of
+the local SQLite `.db` file (it needs a `measurement` table); there is no
+download and no other database backend.
 
-- `main.py` — Tk viewer (reference-day and sequence sliders). Runs the
-  pre-computation behind a splash screen when the cache is not from today.
-- `precompute_sequences.py` — CLI (`--db sqlite|postgres|pg-tailscale`,
-  default `RTI_DB_BACKEND` from `.env`) that computes one sequence per
-  reference day into `sequence_cache/`. With PostgreSQL, all per-day link
-  statistics come from one server-side aggregate (`LINK_DAY_STATS`, ~2.5k rows
-  for 3 months) that uses the covering index
-  `measurement_pc_ts_idx ON measurement (pc_ts) INCLUDE (sender_id, receiver_id, ok_match, rssi, round_id)`.
+- `main.py` — Tk viewer (reference-day and sequence sliders). Asks for the
+  database file, then runs the pre-computation behind a splash screen when
+  there is no cache for that file or the file is newer than its cache.
+- `precompute_sequences.py` — CLI (`python precompute_sequences.py path/to/data.db`)
+  that computes one sequence per reference day into
+  `sequence_cache/<db name>_<hash>/` (one cache folder per database file).
 - `config.py` — `RTIConfig`, all tunable parameters (grid resolution,
   regularization weights, node positions, time windows, history length).
 - `rti_temporal_core.py` — all numerics, no UI: SQL queries, model (grid,
@@ -130,9 +129,7 @@ Run everything from inside `app/` (paths such as `.env`, `sequence_cache/` and
   (`IntervalLoader`), the temporal solver (`solve_temporal`),
   `compute_temporal_sequence` and the on-disk cache helpers.
 - `rti_temporal_visualization.py` — Matplotlib drawing for the 4-panel figure (no Tk).
-- `database.py` — `.env` settings, SQLite / PostgreSQL providers
-  (`open_database()`, `default_backend()`), and the SFTP sync of the local
-  `reduced_data_*.db` (used only by the `sqlite` fallback backend).
+- `database.py` — `SQLiteDatabase`: validates the chosen file and opens connections.
 
 ## Why `solve_temporal` Cannot Solve Independently
 

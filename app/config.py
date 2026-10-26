@@ -7,8 +7,7 @@ OUTER_LINK_MODES = ("keep", "downweight", "exclude")
 
 @dataclass(frozen=True)
 class RTIConfig:
-    db_path: Path = Path("reduced_data.db")
-    db_max_age_hours: float = 8.0
+    db_path: Path | None = None  # chosen by the user at startup
     sequence_cache_dir: Path = Path("sequence_cache")
     history_months: int | None = 6  # None = all data from the first measurement
 

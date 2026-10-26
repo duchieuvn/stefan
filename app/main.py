@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Dynamische RTI aus sensor_data.db mit räumlicher + zeitlicher Regularisierung.
+Dynamische RTI aus einer lokalen SQLite-Datenbank mit räumlicher + zeitlicher Regularisierung.
 
 Tk viewer for the sequences pre-computed by `precompute_sequences.py`
 (numerics in `rti_temporal_core`, drawing in `rti_temporal_visualization`).
@@ -12,7 +12,8 @@ import logging
 import threading
 import tkinter as tk
 from collections.abc import Callable
-from tkinter import messagebox, ttk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 
 # rti_temporal_core must be imported before Matplotlib/NumPy (sets BLAS thread limits).
 from rti_temporal_core import (
@@ -21,6 +22,7 @@ from rti_temporal_core import (
     cache_is_current,
     cache_path,
     cached_dates,
+    config_for_database,
     interval_label,
     load_cached_sequence,
     setup_logging,
@@ -33,6 +35,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 import precompute_sequences
 from config import DEFAULT_CONFIG, RTIConfig
+from database import SQLiteDatabase
 from rti_temporal_visualization import clear_figure, create_temporal_figure, draw_temporal_sequence_view
 
 LOAD_DELAY_MS = 160
@@ -222,7 +225,7 @@ class RTITemporalSliderApp:
                 self.canvas.draw_idle()
                 self.info_var.set(
                     f"Fehler beim Laden von {path.name}: {e}\n"
-                    "Bitte 'precompute_sequences.py' ausführen, um den Cache zu erstellen."
+                    "Bitte die App neu starten, um den Cache neu zu erstellen."
                 )
                 return
             self.loaded[ref_date] = result
@@ -268,13 +271,28 @@ def _show_error(message: str) -> None:
     root.destroy()
 
 
+def _ask_database_path() -> Path | None:
+    """Lets the user pick the local SQLite file; None if cancelled."""
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        chosen = filedialog.askopenfilename(
+            parent=root,
+            title="SQLite-Datenbank (.db) auswählen",
+            filetypes=[("SQLite-Datenbank", "*.db *.sqlite *.sqlite3"), ("Alle Dateien", "*")],
+        )
+    finally:
+        root.destroy()
+    return Path(chosen) if chosen else None
+
+
 def _run_precompute_with_progress(config: RTIConfig) -> None:
     """Runs precompute_sequences.run() in a background thread behind a splash window."""
     splash = tk.Tk()
     splash.title("Bitte warten")
     splash.geometry("440x120")
     splash.resizable(False, False)
-    ttk.Label(splash, text="Aktualisiere Datenbank und berechne Sequenzen ...", wraplength=400, padding=16).pack()
+    ttk.Label(splash, text="Berechne Sequenzen aus der Datenbank ...", wraplength=400, padding=16).pack()
     progress = ttk.Progressbar(splash, mode="indeterminate")
     progress.pack(fill="x", padx=16, pady=(0, 16))
     progress.start(12)
@@ -283,7 +301,7 @@ def _run_precompute_with_progress(config: RTIConfig) -> None:
 
     def worker() -> None:
         try:
-            precompute_sequences.run(config)
+            precompute_sequences.run(config.db_path, config)
         except Exception as error:
             errors.append(error)
 
@@ -307,8 +325,20 @@ def main(config: RTIConfig = DEFAULT_CONFIG) -> None:
     setup_logging()
     logging.info("Starting RTI Temporal Slider App.")
 
+    db_path = _ask_database_path()
+    if db_path is None:
+        logging.info("No database selected. Exiting.")
+        return
+    try:
+        config = config_for_database(config, db_path)
+        SQLiteDatabase(config.db_path)  # validates the file
+    except Exception as error:
+        logging.exception("Invalid database %s.", db_path)
+        _show_error(f"Ungültige Datenbank:\n{db_path}\n\n{error}")
+        return
+
     if not cache_is_current(config):
-        logging.info("Sequence cache is missing or not from today. Running precompute_sequences...")
+        logging.info("Sequence cache is missing or older than the database. Running precompute_sequences...")
         try:
             _run_precompute_with_progress(config)
         except Exception as error:
@@ -320,7 +350,7 @@ def main(config: RTIConfig = DEFAULT_CONFIG) -> None:
     if not ref_dates:
         _show_error(
             f"Keine vorberechneten Sequenzdateien (*.joblib) gefunden in:\n{config.sequence_cache_dir}\n"
-            "Bitte zuerst 'precompute_sequences.py' ausführen."
+            "In der Datenbank wurden keine nutzbaren Messdaten gefunden."
         )
         return
     logging.info("Found %d pre-computed reference dates.", len(ref_dates))

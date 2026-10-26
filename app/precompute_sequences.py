@@ -7,32 +7,30 @@ treated as a reference day; the full temporal sequence relative to it is
 computed and saved to `sequence_cache/<date>.joblib`, overwriting old files.
 The viewer (main.py) only loads these files.
 
-With a PostgreSQL backend the per-day link statistics are aggregated on the
-server in one query; with SQLite they are computed from the raw rows of a
-local copy synced over SFTP.
+The link statistics are computed from the raw rows of a local SQLite file.
 
 Usage:
-    python precompute_sequences.py [--db sqlite|postgres|pg-tailscale]
+    python precompute_sequences.py path/to/data.db
 """
 
 import argparse
 import logging
-from dataclasses import replace
-from datetime import timedelta
+from pathlib import Path
 
 from config import DEFAULT_CONFIG, RTIConfig
-from database import BACKENDS, DatabaseProvider, default_backend, ensure_local_database_current, open_database
+from database import SQLiteDatabase
 from rti_temporal_core import (
     IntervalLoader,
     build_model_context,
     compute_temporal_sequence,
+    config_for_database,
     prune_cache,
     save_cached_sequence,
     setup_logging,
 )
 
 
-def precompute_all(config: RTIConfig, database: DatabaseProvider) -> None:
+def precompute_all(config: RTIConfig, database: SQLiteDatabase) -> None:
     """Computes and saves the sequence for every reference date."""
     # Daily intervals are reused across all reference sequences.
     loader = IntervalLoader(database, config)
@@ -58,38 +56,22 @@ def precompute_all(config: RTIConfig, database: DatabaseProvider) -> None:
     logging.info("Pre-computation finished.")
 
 
-def run(config: RTIConfig = DEFAULT_CONFIG, backend: str | None = None) -> None:
-    """Pre-computes all sequences from `backend`. For SQLite, first makes sure the
-    local database copy is fresh (syncing from the remote host if needed).
-    `backend` defaults to RTI_DB_BACKEND from `.env`."""
-    backend = backend or default_backend()
-    if backend == "sqlite":
-        db_path = ensure_local_database_current(config.db_path.parent, timedelta(hours=config.db_max_age_hours))
-        config = replace(config, db_path=db_path)
-
-    logging.info("Using %s backend.", backend)
-    database = open_database(backend, config.db_path)
-    try:
-        precompute_all(config, database)
-    finally:
-        database.close()
+def run(db_path: Path, config: RTIConfig = DEFAULT_CONFIG) -> RTIConfig:
+    """Pre-computes all sequences from the SQLite file `db_path`.
+    Returns the config pointing at that database and its cache folder."""
+    config = config_for_database(config, db_path)
+    logging.info("Using database %s.", config.db_path)
+    precompute_all(config, SQLiteDatabase(config.db_path))
+    return config
 
 
 def main() -> None:
     setup_logging()
 
     parser = argparse.ArgumentParser(description="Pre-compute and cache RTI sequences to disk.")
-    parser.add_argument(
-        "--db",
-        choices=BACKENDS,
-        default=None,
-        help="Database backend (default: RTI_DB_BACKEND from .env, else sqlite). 'sqlite' uses the newest local "
-        "reduced_data_*.db, syncing a fresh one from the remote host first if missing or older than "
-        f"{DEFAULT_CONFIG.db_max_age_hours:g} h; 'postgres' uses an SSH tunnel; 'pg-tailscale' connects directly "
-        "(both aggregate on the server).",
-    )
+    parser.add_argument("db", type=Path, help="Path to the local SQLite .db file.")
     args = parser.parse_args()
-    run(DEFAULT_CONFIG, backend=args.db)
+    run(args.db)
 
 
 if __name__ == "__main__":
