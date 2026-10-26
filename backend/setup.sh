@@ -12,6 +12,9 @@
 # name of this machine's new database (e.g. sensor_data_site2) and the password of the
 # PostgreSQL user holzofen; DB_NAME=... and DB_PASSWORD=... in the environment skip that.
 # DB_SERVER=host:port changes the server (default: 100.100.51.120:5432, over tailscale).
+# Tailscale login without the browser step: put TS_AUTHKEY=tskey-auth-... in backend/tailscale.env
+# (git-ignored; copy it to each machine once) or set TS_AUTHKEY in the environment. Create a
+# reusable key at https://login.tailscale.com/admin/settings/keys.
 set -euo pipefail
 
 BACKEND_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -88,8 +91,22 @@ else
     did "installed tailscale"
 fi
 if ! tailscale status >/dev/null 2>&1; then
-    echo "   Log this machine in to the tailnet: open the link below in a browser."
-    sudo tailscale up
+    # The key comes from backend/tailscale.env (git-ignored, one line: TS_AUTHKEY=tskey-auth-...)
+    # or from the environment.
+    if [ -z "${TS_AUTHKEY:-}" ] && [ -f "$BACKEND_DIR/tailscale.env" ]; then
+        TS_AUTHKEY="$(sed -n 's/^TS_AUTHKEY=//p' "$BACKEND_DIR/tailscale.env" | head -1 | tr -d "\"' \r")"
+    fi
+    if [ -n "${TS_AUTHKEY:-}" ]; then
+        # Passed as a file so the key doesn't show up in the process list.
+        keyfile="$(mktemp)"
+        printf '%s' "$TS_AUTHKEY" > "$keyfile"
+        sudo tailscale up --auth-key="file:$keyfile" || { rm -f "$keyfile"; die "tailscale login with TS_AUTHKEY failed (expired or already used key?)"; }
+        rm -f "$keyfile"
+        did "logged in to the tailnet with TS_AUTHKEY"
+    else
+        echo "   Log this machine in to the tailnet: open the link below in a browser."
+        sudo tailscale up
+    fi
 fi
 ok "tailscale is connected ($(tailscale ip -4 | head -1))"
 
