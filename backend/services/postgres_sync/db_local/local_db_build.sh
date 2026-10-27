@@ -36,15 +36,9 @@ echo "3. Creating tables and indexes..."
 sudo -u postgres psql -v ON_ERROR_STOP=1 --dbname="$POSTGRES_DB" <<-EOSQL
     SET ROLE holzofen;
 
-    CREATE TABLE rounds (
-        round_id BIGINT PRIMARY KEY,
-        pc_start TEXT,
-        pc_end TEXT,
-        duration_s DOUBLE PRECISION,
-        nodes_csv TEXT,
-        ok_links BIGINT,
-        total_links BIGINT,
-        timeouts BIGINT,
+    CREATE TABLE setting (
+        setting_id BIGINT PRIMARY KEY,
+        created_at TEXT NOT NULL,
         freq_mhz DOUBLE PRECISION,
         tx_power BIGINT,
         sf BIGINT,
@@ -55,6 +49,18 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 --dbname="$POSTGRES_DB" <<-EOSQL
         baudrate BIGINT,
         measure_interval_s DOUBLE PRECISION,
         notes TEXT
+    );
+
+    CREATE TABLE rounds (
+        round_id BIGINT PRIMARY KEY,
+        pc_start TEXT,
+        pc_end TEXT,
+        duration_s DOUBLE PRECISION,
+        nodes_csv TEXT,
+        ok_links BIGINT,
+        total_links BIGINT,
+        timeouts BIGINT,
+        setting_id BIGINT REFERENCES setting(setting_id)
     );
 
     CREATE TABLE measurement (

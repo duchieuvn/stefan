@@ -19,6 +19,12 @@ from config import *
 # =========================
 MEASUREMENT_TABLE = "measurement"
 ROUNDS_TABLE = "rounds"
+SETTING_TABLE = "setting"
+
+SETTING_COLUMNS = (
+    "freq_mhz", "tx_power", "sf", "bw_khz", "cr_denom", "lora_applied",
+    "port", "baudrate", "measure_interval_s", "notes",
+)
 
 
 def connect_db(db_path: str, timeout_s: float = 30.0) -> sqlite3.Connection:
@@ -64,18 +70,9 @@ def init_db(db_path: str) -> None:
     """)
 
     cur.execute(f"""
-        CREATE TABLE IF NOT EXISTS {quote_ident(ROUNDS_TABLE)} (
-            round_id INTEGER PRIMARY KEY,
-
-            pc_start TEXT,
-            pc_end TEXT,
-            duration_s REAL,
-
-            nodes_csv TEXT,
-
-            ok_links INTEGER,
-            total_links INTEGER,
-            timeouts INTEGER,
+        CREATE TABLE IF NOT EXISTS {quote_ident(SETTING_TABLE)} (
+            setting_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
 
             freq_mhz REAL,
             tx_power INTEGER,
@@ -89,6 +86,24 @@ def init_db(db_path: str) -> None:
             measure_interval_s REAL,
 
             notes TEXT
+        );
+    """)
+
+    cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS {quote_ident(ROUNDS_TABLE)} (
+            round_id INTEGER PRIMARY KEY,
+
+            pc_start TEXT,
+            pc_end TEXT,
+            duration_s REAL,
+
+            nodes_csv TEXT,
+
+            ok_links INTEGER,
+            total_links INTEGER,
+            timeouts INTEGER,
+
+            setting_id INTEGER REFERENCES {quote_ident(SETTING_TABLE)}(setting_id)
         );
     """)
 
@@ -113,6 +128,26 @@ def store_measurement(cur: sqlite3.Cursor, row: Dict[str, Any]) -> None:
     ))
 
 
+def get_or_create_setting(cur: sqlite3.Cursor, values: Dict[str, Any]) -> int:
+    """Return the id of the latest setting row equal to `values`, or insert a new one."""
+    params = tuple(values.get(c) for c in SETTING_COLUMNS)
+    match = " AND ".join(f"{c} IS ?" for c in SETTING_COLUMNS)
+    row = cur.execute(
+        f"SELECT setting_id FROM {quote_ident(SETTING_TABLE)} WHERE {match} "
+        "ORDER BY setting_id DESC LIMIT 1;",
+        params,
+    ).fetchone()
+    if row:
+        return int(row[0])
+
+    cur.execute(
+        f"INSERT INTO {quote_ident(SETTING_TABLE)} (created_at, {', '.join(SETTING_COLUMNS)}) "
+        f"VALUES (?, {', '.join('?' * len(SETTING_COLUMNS))});",
+        (now_iso(), *params),
+    )
+    return int(cur.lastrowid)
+
+
 def store_round(cur: sqlite3.Cursor, info: Dict[str, Any]) -> None:
     cur.execute(f"""
         INSERT OR REPLACE INTO {quote_ident(ROUNDS_TABLE)} (
@@ -123,10 +158,8 @@ def store_round(cur: sqlite3.Cursor, info: Dict[str, Any]) -> None:
 
             ok_links, total_links, timeouts,
 
-            freq_mhz, tx_power, sf, bw_khz, cr_denom, lora_applied,
-
-            port, baudrate, measure_interval_s, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            setting_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
     """, (
         info.get("round_id"),
         info.get("pc_start"), info.get("pc_end"), info.get("duration_s"),
@@ -135,11 +168,7 @@ def store_round(cur: sqlite3.Cursor, info: Dict[str, Any]) -> None:
 
         info.get("ok_links"), info.get("total_links"), info.get("timeouts"),
 
-        info.get("freq_mhz"), info.get("tx_power"), info.get("sf"),
-        info.get("bw_khz"), info.get("cr_denom"), info.get("lora_applied"),
-
-        info.get("port"), info.get("baudrate"), info.get("measure_interval_s"),
-        info.get("notes"),
+        info.get("setting_id"),
     ))
 
 
@@ -481,7 +510,7 @@ def send_led_cmd(client, sid: int, on: bool) -> None:
 # =========================
 # Measurement loop
 # =========================
-def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[str, Any],
+def one_round(client, conn: sqlite3.Connection, round_id: int, setting_id: int,
               ctx: ServiceContext) -> Optional[Dict[str, Any]]:
     """
     Eine Messrunde; gibt die gespeicherten Rundendaten zurück, oder None, wenn ctx
@@ -579,9 +608,6 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
 
             t_match_or_timeout = time.perf_counter()
 
-            rx_wait_ms = (t_match_or_timeout - t_send_done) * 1000.0
-            e2e_ms = (t_match_or_timeout - t_send0) * 1000.0
-
             id_match = (rx is not None and int(rx.get("rx_id", -1)) == int(sender_id))
             ts_match = (rx is not None and int(rx.get("node_timestamp", -1)) == int(tx_timestamp))
             ok_match = 1 if (id_match and ts_match) else 0
@@ -603,8 +629,6 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
                     f"{status} {sender_id}->{receiver_id} | "
                     f"RSSI={rssi_txt} dBm | "
                     f"SNR={snr_txt} dB | "
-                    f"rx_wait={rx_wait_ms:.1f} ms | "
-                    f"e2e={e2e_ms:.1f} ms | "
                 )
 
             row = {
@@ -663,17 +687,7 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
         "total_links": total_links,
         "timeouts": timeouts,
 
-        "freq_mhz": lora_cfg.get("freq_mhz"),
-        "tx_power": lora_cfg.get("tx_power"),
-        "sf": lora_cfg.get("sf"),
-        "bw_khz": lora_cfg.get("bw_khz"),
-        "cr_denom": lora_cfg.get("cr_denom"),
-        "lora_applied": lora_cfg.get("lora_applied", 0),
-
-        "port": PORT,
-        "baudrate": BAUDRATE,
-        "measure_interval_s": MEASURE_INTERVAL_S,
-        "notes": "",
+        "setting_id": setting_id,
     }
 
     try:
@@ -733,6 +747,20 @@ def run(ctx: ServiceContext, lora: str = "ask") -> None:
             lora_cfg = read_lora_config_or_defaults(client)
         ctx.report(lora=lora_summary(lora_cfg))
 
+        setting_id = get_or_create_setting(cur, {
+            "freq_mhz": lora_cfg.get("freq_mhz"),
+            "tx_power": lora_cfg.get("tx_power"),
+            "sf": lora_cfg.get("sf"),
+            "bw_khz": lora_cfg.get("bw_khz"),
+            "cr_denom": lora_cfg.get("cr_denom"),
+            "lora_applied": lora_cfg.get("lora_applied", 0),
+            "port": PORT,
+            "baudrate": BAUDRATE,
+            "measure_interval_s": MEASURE_INTERVAL_S,
+            "notes": "",
+        })
+        safe_commit(conn)
+
         print("\n=== Start measurement loop ===")
         print("Stop with Ctrl+C\n")
 
@@ -740,7 +768,7 @@ def run(ctx: ServiceContext, lora: str = "ask") -> None:
             t0 = time.perf_counter()
             started = datetime.now()
             ctx.report(activity=f"round {next_round} running")
-            info = one_round(client, conn, next_round, lora_cfg, ctx)
+            info = one_round(client, conn, next_round, setting_id, ctx)
             if info is None:
                 break
             ctx.report(

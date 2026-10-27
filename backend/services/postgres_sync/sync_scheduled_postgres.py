@@ -46,15 +46,9 @@ POSTGRES_STATEMENT_TIMEOUT_MS = 120_000
 POSTGRES_LOCK_TIMEOUT_MS = 30_000
 
 # Column name -> PostgreSQL type. The column order is also the copy order.
-ROUNDS_SCHEMA = {
-    "round_id": "BIGINT PRIMARY KEY",
-    "pc_start": "TEXT",
-    "pc_end": "TEXT",
-    "duration_s": "DOUBLE PRECISION",
-    "nodes_csv": "TEXT",
-    "ok_links": "BIGINT",
-    "total_links": "BIGINT",
-    "timeouts": "BIGINT",
+SETTING_SCHEMA = {
+    "setting_id": "BIGINT PRIMARY KEY",
+    "created_at": "TEXT NOT NULL",
     "freq_mhz": "DOUBLE PRECISION",
     "tx_power": "BIGINT",
     "sf": "BIGINT",
@@ -65,6 +59,17 @@ ROUNDS_SCHEMA = {
     "baudrate": "BIGINT",
     "measure_interval_s": "DOUBLE PRECISION",
     "notes": "TEXT",
+}
+ROUNDS_SCHEMA = {
+    "round_id": "BIGINT PRIMARY KEY",
+    "pc_start": "TEXT",
+    "pc_end": "TEXT",
+    "duration_s": "DOUBLE PRECISION",
+    "nodes_csv": "TEXT",
+    "ok_links": "BIGINT",
+    "total_links": "BIGINT",
+    "timeouts": "BIGINT",
+    "setting_id": "BIGINT REFERENCES setting(setting_id)",
 }
 MEASUREMENT_SCHEMA = {
     "id": "BIGINT PRIMARY KEY",
@@ -146,7 +151,9 @@ def create_database(dsn: str) -> None:
 def create_postgres_schema(pg: psycopg2.extensions.connection) -> None:
     """Create the destination tables when running against an empty database."""
     with pg, pg.cursor() as cursor:
-        for table, schema in (("rounds", ROUNDS_SCHEMA), ("measurement", MEASUREMENT_SCHEMA)):
+        for table, schema in (
+            ("setting", SETTING_SCHEMA), ("rounds", ROUNDS_SCHEMA), ("measurement", MEASUREMENT_SCHEMA),
+        ):
             columns = ", ".join(f"{name} {type_}" for name, type_ in schema.items())
             cursor.execute(f"CREATE TABLE IF NOT EXISTS {table} ({columns})")
         cursor.execute("CREATE INDEX IF NOT EXISTS measurement_round_id_idx ON measurement(round_id)")
@@ -203,9 +210,14 @@ def copy_batch(
 
 
 def sync_batch(src: sqlite3.Connection, pg: psycopg2.extensions.connection) -> Position:
-    """Copy the next batch of rounds, then of measurements whose round already
+    """Copy new settings, then the next batch of rounds, then of measurements whose round already
     exists in PostgreSQL. Returns the new PostgreSQL position."""
     round_id, measurement_id = postgres_position(pg)
+    # Settings are few; copy the ones the rounds below may reference.
+    with pg.cursor() as cursor:
+        cursor.execute("SELECT COALESCE(MAX(setting_id), 0) FROM setting")
+        setting_id = int(cursor.fetchone()[0])
+    copy_batch(src, pg, "setting", tuple(SETTING_SCHEMA), "setting_id > ? ORDER BY setting_id", (setting_id,))
     copy_batch(src, pg, "rounds", tuple(ROUNDS_SCHEMA), "round_id > ? ORDER BY round_id", (round_id,))
 
     round_id, _ = postgres_position(pg)

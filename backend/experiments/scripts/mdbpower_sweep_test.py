@@ -161,8 +161,6 @@ def init_db(db_path: str) -> None:
             payload_text TEXT,
 
             trigger_ms REAL,
-            rx_wait_ms REAL,
-            e2e_ms REAL,
 
             ok_match INTEGER,
 
@@ -220,15 +218,15 @@ def store_measurement(cur: sqlite3.Cursor, row: Dict[str, Any]) -> None:
             pc_ts,
             round_id, sender_id, receiver_id,
             marker, payload_len, payload_text,
-            trigger_ms, rx_wait_ms, e2e_ms,
+            trigger_ms,
             ok_match, rx_id, node_timestamp, rssi, snr,
             bme_wait_ms, bme_temp, bme_hum, bme_press
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
     """, (
         row.get("pc_ts"),
         row.get("round_id"), row.get("sender_id"), row.get("receiver_id"),
         row.get("marker"), row.get("payload_len"), row.get("payload_text"),
-        row.get("trigger_ms"), row.get("rx_wait_ms"), row.get("e2e_ms"),
+        row.get("trigger_ms"),
         row.get("ok_match"), row.get("rx_id"), row.get("node_timestamp"),
         row.get("rssi"), row.get("snr"),
         row.get("bme_wait_ms"), row.get("bme_temp"), row.get("bme_hum"), row.get("bme_press"),
@@ -290,7 +288,7 @@ MEASUREMENT_CSV_FIELDS = [
     "pc_ts", "round_id", "sender_id", "receiver_id",
     "freq_mhz", "tx_power", "sf", "bw_khz", "cr_denom",
     "payload_len",
-    "trigger_ms", "rx_wait_ms", "e2e_ms",
+    "trigger_ms",
     "ok_match", "rx_id", "node_timestamp", "rssi", "snr",
     "bme_temp", "bme_hum", "bme_press",
 ]
@@ -665,9 +663,6 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
 
             t_match_or_timeout = time.perf_counter()
 
-            rx_wait_ms = (t_match_or_timeout - t_send_done) * 1000.0
-            e2e_ms = (t_match_or_timeout - t_send0) * 1000.0
-
             id_match = (rx is not None and int(rx.get("rx_id", -1)) == int(sender_id))
             ts_match = (rx is not None and int(rx.get("node_timestamp", -1)) == int(tx_timestamp))
             ok_match = 1 if (id_match and ts_match) else 0
@@ -698,8 +693,6 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
                     f"{status} {sender_id}->{receiver_id} | "
                     f"RSSI={rssi_txt} dBm | "
                     f"SNR={snr_txt} dB | "
-                    f"rx_wait={rx_wait_ms:.1f} ms | "
-                    f"e2e={e2e_ms:.1f} ms | "
                     f"T={bt_txt} °C H={bh_txt} % P={bp_txt} hPa"
                 )
 
@@ -715,8 +708,6 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
                 "payload_text": PAYLOAD_TEXT,
 
                 "trigger_ms": trigger_ms,
-                "rx_wait_ms": rx_wait_ms,
-                "e2e_ms": e2e_ms,
 
                 "ok_match": ok_match,
 
@@ -750,8 +741,6 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, lora_cfg: Dict[st
                     "cr_denom": lora_cfg.get("cr_denom"),
                     "payload_len": row["payload_len"],
                     "trigger_ms": row["trigger_ms"],
-                    "rx_wait_ms": row["rx_wait_ms"],
-                    "e2e_ms": row["e2e_ms"],
                     "ok_match": row["ok_match"],
                     "rx_id": row["rx_id"],
                     "node_timestamp": row["node_timestamp"],
