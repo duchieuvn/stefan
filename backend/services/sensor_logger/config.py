@@ -1,19 +1,52 @@
-"""Settings for backend/services/sensor_logger, loaded from its .env (falls back to .env.test)."""
+"""Settings for backend/services/sensor_logger, loaded from its .env.
+
+.env is a symlink to .env.prod or .env.test. On the first run (no .env yet) the
+choice is asked on the terminal; without a terminal it fails instead of guessing.
+"""
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "manager"))  # for db_path
+import db_path
+
 MASTER_DIR = Path(__file__).resolve().parent
-ENV_PATH = MASTER_DIR / ".env" if (MASTER_DIR / ".env").exists() else MASTER_DIR / ".env.test"
+ENV_PATH = MASTER_DIR / ".env"
+ENV_CHOICES = ("prod", "test")
+
+
+def ask_env() -> str:
+    """Ask on the terminal which hardware config to use: "prod" or "test"."""
+    print(f"{ENV_PATH} does not exist yet. Which config should the sensor logger use?")
+    print("  prod = .env.prod (production hardware)\n  test = .env.test (test hardware)")
+    while True:
+        answer = input("Config [prod/test]: ").strip().lower()
+        if answer in ENV_CHOICES:
+            return answer
+        print("Please answer prod or test.")
+
+
+def link_env(choice: str) -> None:
+    """Point .env at .env.<choice>."""
+    ENV_PATH.symlink_to(f".env.{choice}")
+    print(f"{ENV_PATH} -> .env.{choice}")
+
+
+if not ENV_PATH.exists() and not ENV_PATH.is_symlink():
+    if not sys.stdin.isatty():
+        raise RuntimeError(f"{ENV_PATH} does not exist. Choose the config once: run "
+                           f"main_senor_data.py in a terminal, or ln -s .env.prod (or .env.test) {ENV_PATH}")
+    link_env(ask_env())
 load_dotenv(ENV_PATH)
 env = os.environ
 
 # Serial / storage
 PORT = env["PORT"]
 BAUDRATE = int(env["BAUDRATE"])
-DATA_DIR = MASTER_DIR.parents[1] / env["DATA_DIR"]   # relative to backend/
-DB_PATH = str(DATA_DIR / env["DB_FILENAME"])
+DB_PATH = str(db_path.sqlite_path())   # backend/data_path.env, asked on the first run
+DATA_DIR = Path(DB_PATH).parent
 
 NODES = [int(n) for n in env["NODES"].split(",")]
 

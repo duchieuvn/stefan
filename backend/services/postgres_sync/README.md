@@ -7,7 +7,7 @@ pairs are named profiles (`main`, `reduced`) configured in `.env`:
 
 | Key | Meaning |
 |---|---|
-| `<SOURCE>_SQLITE_PATH` | Source SQLite file, e.g. `MAIN_SQLITE_PATH` |
+| `<SOURCE>_SQLITE_PATH` | Source SQLite file, relative to `backend/` or absolute, e.g. `REDUCED_SQLITE_PATH`. `MAIN_SQLITE_PATH` is optional: it defaults to the sensor database in `backend/data_path.env` (asked on the first run) |
 | `<SOURCE>_<CONNECTION>_DSN` | Target PostgreSQL DSN, e.g. `MAIN_TAILSCALE_DSN`, `REDUCED_LOCAL_DSN` |
 
 `.env` is loaded from this directory, so the script works from any working

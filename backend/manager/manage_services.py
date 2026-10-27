@@ -53,6 +53,7 @@ from datetime import datetime
 from multiprocessing.connection import Connection
 from pathlib import Path
 
+import db_path
 import service_runtime
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -61,6 +62,8 @@ PYTHON = os.environ.get("SERVICES_PYTHON", sys.executable)
 SOCKET_PATH = BACKEND_DIR / "manage_services.sock"
 PID_PATH = BACKEND_DIR / "manage_services.pid"
 DAEMON_LOG = LOG_DIR / "manage_services.log"
+# Symlink to .env.prod or .env.test; asked for before the sensor logger's first start.
+SENSOR_ENV = BACKEND_DIR / "services/sensor_logger/.env"
 
 START_GAP_S = 2.0            # pause between starts when starting several services
 STOP_GRACE_S = 15.0          # after a stop request, wait this long before SIGTERM
@@ -702,6 +705,34 @@ def ask_ota_settings(ask, nodes: str | None = None, ssid: str | None = None,
     return settings
 
 
+def sensor_env_missing() -> bool:
+    return not SENSOR_ENV.exists() and not SENSOR_ENV.is_symlink()
+
+
+def ask_sensor_env(ask) -> str | None:
+    """Ask whether the sensor logger uses .env.prod or .env.test and link .env to it.
+
+    ask(label) returns the answer, or None on cancel. Returns the choice, or None
+    if the user cancelled. Raises ValueError on an unusable answer.
+    """
+    answer = ask("Sensor logger has no .env yet. Config [prod/test]")
+    if answer is None:
+        return None
+    answer = answer.strip().lower()
+    if answer not in ("prod", "test"):
+        raise ValueError(f"Not a config: {answer!r} (answer prod or test)")
+    SENSOR_ENV.symlink_to(f".env.{answer}")
+    return answer
+
+
+# Asked once, before the first start of a service that needs it:
+# (services, is it missing, ask(ask_line) -> answer or None, file it writes).
+FIRST_RUN = (
+    (("sensor",), sensor_env_missing, ask_sensor_env, SENSOR_ENV),
+    (("sensor", "sync", "reduce"), db_path.missing, db_path.ask_sqlite_path, db_path.DATA_PATH_ENV),
+)
+
+
 # --- Log tail ----------------------------------------------------------------
 
 def tail_log(path: Path, count: int) -> list[str]:
@@ -895,6 +926,16 @@ class Tui:
     def start_selected(self) -> None:
         targets = self.targets()
         settings = {}
+        for keys, missing, ask, path in FIRST_RUN:
+            if any(KEYS[key] in targets for key in keys) and missing():
+                try:
+                    answer = ask(lambda label: self.prompt(label))
+                except ValueError as error:
+                    self.message = str(error)
+                    return
+                if answer is None:
+                    self.message = f"Start cancelled: {path.name} is needed first."
+                    return
         if KEYS["ota"] in targets:
             try:
                 ota = ask_ota_settings(lambda label, secret: self.prompt(label, secret))
@@ -1034,6 +1075,34 @@ def wait_until(done, timeout: float) -> None:
 
 
 def start_services(keys: list[str]) -> int:
+    def ask_line(label: str) -> str | None:
+        try:
+            return input(f"{label}: ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+
+    for needs, missing, ask, path in FIRST_RUN:
+        if not missing() or not set(needs) & set(keys):
+            continue
+        if not sys.stdin.isatty():
+            # e.g. cron @reboot: no one to ask, so leave these services out instead of guessing.
+            left_out = [key for key in keys if key in needs]
+            print(f"Not started: {', '.join(SERVICES[KEYS[key]].name for key in left_out)} ({path} does not "
+                  f"exist; run 'manage_services.py start {' '.join(left_out)}' in a terminal to set it)")
+            keys = [key for key in keys if key not in needs]
+            continue
+        try:
+            answer = ask(ask_line)
+        except ValueError as error:
+            print(error)
+            return 1
+        if answer is None:
+            print(f"Start cancelled: {path.name} is needed first.")
+            return 1
+        print(f"{path} written ({answer})")
+    if not keys:
+        return 1
     ensure_daemon()
     response = call("start", keys)
     if not response["ok"]:

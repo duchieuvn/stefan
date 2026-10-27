@@ -3,7 +3,8 @@
 
 Source/target pairs are named profiles configured in .env next to this file:
 
-    <SOURCE>_SQLITE_PATH          e.g. MAIN_SQLITE_PATH
+    <SOURCE>_SQLITE_PATH          e.g. REDUCED_SQLITE_PATH; relative to backend/. MAIN_SQLITE_PATH
+                                  defaults to the sensor database in backend/data_path.env
     <SOURCE>_<CONNECTION>_DSN     e.g. MAIN_TAILSCALE_DSN, REDUCED_LOCAL_DSN
 
 Rows are copied incrementally by key (rounds.round_id, measurement.id) in
@@ -26,6 +27,7 @@ from psycopg2 import sql
 from psycopg2.extras import execute_values
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "manager"))  # for service_runtime
+import db_path
 from service_runtime import ServiceContext
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"
@@ -259,7 +261,15 @@ def run_scheduled_sync(sqlite_path: Path, dsn: str, ctx: ServiceContext) -> bool
 
 def profile(source: str, connection: str) -> tuple[Path, str]:
     """SQLite path and PostgreSQL DSN of a source/connection profile from .env."""
-    sqlite_path = Path(require_env(f"{source.upper()}_SQLITE_PATH")).expanduser()
+    # Relative paths are relative to backend/. The main source defaults to the sensor
+    # database from backend/data_path.env (asked on the first run).
+    configured = os.environ.get(f"{source.upper()}_SQLITE_PATH")
+    if configured:
+        sqlite_path = db_path.resolve(configured)
+    elif source == "main":
+        sqlite_path = db_path.sqlite_path()
+    else:
+        sqlite_path = db_path.resolve(require_env(f"{source.upper()}_SQLITE_PATH"))
     dsn = require_env(f"{source.upper()}_{connection.upper()}_DSN")
     log(f"Sync configuration: source={source}, connection={connection}, sqlite_path={sqlite_path}")
     return sqlite_path, dsn

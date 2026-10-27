@@ -4,7 +4,8 @@
 # services. Idempotent: each step only adds what is missing and never overwrites existing
 # config or data, so it is also safe to re-run on a machine that is already set up.
 #
-#   bash backend/setup.sh                       # production hardware config (services/sensor_logger/.env.prod)
+#   bash backend/setup.sh                       # asks for the hardware config if services/sensor_logger/.env is missing
+#   bash backend/setup.sh --prod                # production hardware config (services/sensor_logger/.env.prod)
 #   bash backend/setup.sh --test                # test hardware config (services/sensor_logger/.env.test)
 #   bash backend/setup.sh --import-sqlite DIR   # first copy sensor_data.db / reduced_data.db from DIR
 #
@@ -24,16 +25,18 @@ SENSOR_DIR="$BACKEND_DIR/services/sensor_logger"
 SYNC_SCRIPT="$SYNC_DIR/sync_scheduled_postgres.py"
 SYNC_ENV="$SYNC_DIR/.env"
 MASTER_ENV="$SENSOR_DIR/.env"
+DATA_PATH_ENV="$BACKEND_DIR/data_path.env"
 ENV_NAME="stefan"
 SERVICE_IMPORTS="pymodbus, serial, psycopg2, schedule, dotenv"
 DB_SERVER="${DB_SERVER:-100.100.51.120:5432}"
 DB_USER="holzofen"
 USER="${USER:-$(id -un)}"
 
-hardware="prod"
+hardware=""
 import_dir=""
 while [ $# -gt 0 ]; do
     case "$1" in
+        --prod) hardware="prod" ;;
         --test) hardware="test" ;;
         --import-sqlite) import_dir="${2:?--import-sqlite needs a directory}"; shift ;;
         -h|--help) awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
@@ -159,9 +162,24 @@ done
 if [ -e "$MASTER_ENV" ] || [ -L "$MASTER_ENV" ]; then
     ok "services/sensor_logger/.env exists$( [ -L "$MASTER_ENV" ] && echo " (-> $(readlink "$MASTER_ENV"))")"
 else
+    while [ "$hardware" != "prod" ] && [ "$hardware" != "test" ]; do
+        [ -t 0 ] || die "services/sensor_logger/.env is missing; pass --prod or --test to choose its config"
+        read -r -p "   Sensor logger config [prod/test]: " hardware
+    done
     ln -s ".env.$hardware" "$MASTER_ENV"
     did "services/sensor_logger/.env -> .env.$hardware"
 fi
+
+# The sensor SQLite database, shared by the logger, the sync and the reduce job (manager/db_path.py).
+db_path_py() { "$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); import db_path; print(db_path.sqlite_path())' "$BACKEND_DIR/manager"; }
+if [ -f "$DATA_PATH_ENV" ]; then
+    ok "data_path.env exists ($(env_value "$DATA_PATH_ENV" SQLITE_PATH))"
+else
+    [ -t 0 ] || die "no terminal to ask for the SQLite database path; write SQLITE_PATH=data/sensor_data.db to $DATA_PATH_ENV"
+    "$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); import db_path; db_path.sqlite_path()' "$BACKEND_DIR/manager"   # asks
+    did "data_path.env: SQLITE_PATH=$(env_value "$DATA_PATH_ENV" SQLITE_PATH)"
+fi
+SQLITE_DB="$(db_path_py)"
 
 new_config=0
 if [ -f "$SYNC_ENV" ]; then
@@ -179,10 +197,7 @@ else
         [ -t 0 ] || die "no terminal to ask for the password; set DB_PASSWORD=... instead"
         read -rsp "   Password of the PostgreSQL user $DB_USER: " db_password; echo
     fi
-    # Used for this run (they win over the .env file), written to .env once the login works.
-    data_dir="$(env_value "$MASTER_ENV" DATA_DIR)"
-    case "$data_dir" in /*) ;; *) data_dir="$BACKEND_DIR/$data_dir" ;; esac   # like sensor_logger/config.py
-    export MAIN_SQLITE_PATH="$data_dir/$(env_value "$MASTER_ENV" DB_FILENAME)"
+    # Used for this run (it wins over the .env file), written to .env once the login works.
     MAIN_TAILSCALE_DSN="$(DB_PASSWORD="$db_password" "$PY" -c '
 import os, sys
 from urllib.parse import quote
@@ -223,12 +238,12 @@ if [ "$new_config" = 1 ]; then
 # Configuration for sync_scheduled_postgres.py (source SQLite paths and target DSNs).
 # Written by setup.sh.
 
-# main profile
-MAIN_SQLITE_PATH=$MAIN_SQLITE_PATH
+# main profile (its SQLite path is SQLITE_PATH in backend/data_path.env)
 MAIN_TAILSCALE_DSN=$MAIN_TAILSCALE_DSN
 
 # reduced profile (not synced automatically; fill in a DSN to sync it by hand)
-REDUCED_SQLITE_PATH=$BACKEND_DIR/data/reduced_data.db
+# Relative paths are relative to backend/
+REDUCED_SQLITE_PATH=data/reduced_data.db
 REDUCED_TAILSCALE_DSN=
 EOF
     )
@@ -243,8 +258,9 @@ step "6/8 SQLite data"
 if [ -z "$import_dir" ]; then
     ok "nothing to import (the sensor service creates an empty database on first start)"
 else
-    for key in MAIN_SQLITE_PATH REDUCED_SQLITE_PATH; do
-        target="$(env_value "$SYNC_ENV" "$key")"
+    reduced_db="$(env_value "$SYNC_ENV" REDUCED_SQLITE_PATH)"
+    case "$reduced_db" in /*) ;; *) reduced_db="$BACKEND_DIR/$reduced_db" ;; esac
+    for target in "$SQLITE_DB" "$reduced_db"; do
         source_db="$import_dir/$(basename "$target")"
         if [ -e "$target" ]; then
             ok "$target exists, not overwritten"

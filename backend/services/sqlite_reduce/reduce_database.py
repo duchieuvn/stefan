@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 
 import sqlite3
+import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "manager"))  # for db_path
+import db_path
+
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"   # backend/data (kernbild_01/data on the Pi)
-SRC = DATA_DIR / "sensor_data.db"
 OUT = DATA_DIR / "reduced_data.db"
 
 # Nur Runden behalten, deren round_id durch 5 teilbar ist:
@@ -12,7 +15,9 @@ OUT = DATA_DIR / "reduced_data.db"
 STEP = 5
 
 
-def reduce_database(src: Path = SRC, out: Path = OUT, step: int = STEP) -> None:
+def reduce_database(src: Path | None = None, out: Path = OUT, step: int = STEP) -> None:
+    # The sensor database from backend/data_path.env (asked on the first run)
+    src = src or db_path.sqlite_path()
     if not src.exists():
         raise SystemExit(f"Quelldatenbank nicht gefunden: {src}")
 
