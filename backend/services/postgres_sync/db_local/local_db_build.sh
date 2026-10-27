@@ -47,8 +47,7 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 --dbname="$POSTGRES_DB" <<-EOSQL
         lora_applied BIGINT,
         port TEXT,
         baudrate BIGINT,
-        measure_interval_s DOUBLE PRECISION,
-        notes TEXT
+        measure_interval_s DOUBLE PRECISION
     );
 
     CREATE TABLE rounds (
@@ -69,9 +68,7 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 --dbname="$POSTGRES_DB" <<-EOSQL
         round_id BIGINT REFERENCES rounds(round_id),
         sender_id BIGINT,
         receiver_id BIGINT,
-        marker BIGINT,
         ok_match BIGINT,
-        rx_id BIGINT,
         node_timestamp BIGINT,
         rssi DOUBLE PRECISION,
         snr DOUBLE PRECISION

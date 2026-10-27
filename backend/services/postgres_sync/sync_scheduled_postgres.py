@@ -58,7 +58,6 @@ SETTING_SCHEMA = {
     "port": "TEXT",
     "baudrate": "BIGINT",
     "measure_interval_s": "DOUBLE PRECISION",
-    "notes": "TEXT",
 }
 ROUNDS_SCHEMA = {
     "round_id": "BIGINT PRIMARY KEY",
@@ -77,9 +76,7 @@ MEASUREMENT_SCHEMA = {
     "round_id": "BIGINT REFERENCES rounds(round_id)",
     "sender_id": "BIGINT",
     "receiver_id": "BIGINT",
-    "marker": "BIGINT",
     "ok_match": "BIGINT",
-    "rx_id": "BIGINT",
     "node_timestamp": "BIGINT",
     "rssi": "DOUBLE PRECISION",
     "snr": "DOUBLE PRECISION",

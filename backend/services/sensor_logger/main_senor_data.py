@@ -23,7 +23,7 @@ SETTING_TABLE = "setting"
 
 SETTING_COLUMNS = (
     "freq_mhz", "tx_power", "sf", "bw_khz", "cr_denom", "lora_applied",
-    "port", "baudrate", "measure_interval_s", "notes",
+    "port", "baudrate", "measure_interval_s",
 )
 
 
@@ -57,11 +57,8 @@ def init_db(db_path: str) -> None:
             sender_id INTEGER,
             receiver_id INTEGER,
 
-            marker INTEGER,
-
             ok_match INTEGER,
 
-            rx_id INTEGER,
             node_timestamp INTEGER,
 
             rssi REAL,
@@ -83,9 +80,7 @@ def init_db(db_path: str) -> None:
 
             port TEXT,
             baudrate INTEGER,
-            measure_interval_s REAL,
-
-            notes TEXT
+            measure_interval_s REAL
         );
     """)
 
@@ -116,14 +111,12 @@ def store_measurement(cur: sqlite3.Cursor, row: Dict[str, Any]) -> None:
         INSERT INTO {quote_ident(MEASUREMENT_TABLE)} (
             pc_ts,
             round_id, sender_id, receiver_id,
-            marker,
-            ok_match, rx_id, node_timestamp, rssi, snr
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            ok_match, node_timestamp, rssi, snr
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
     """, (
         row.get("pc_ts"),
         row.get("round_id"), row.get("sender_id"), row.get("receiver_id"),
-        row.get("marker"),
-        row.get("ok_match"), row.get("rx_id"), row.get("node_timestamp"),
+        row.get("ok_match"), row.get("node_timestamp"),
         row.get("rssi"), row.get("snr"),
     ))
 
@@ -637,12 +630,8 @@ def one_round(client, conn: sqlite3.Connection, round_id: int, setting_id: int,
                 "sender_id": sender_id,
                 "receiver_id": receiver_id,
 
-                # marker-Feld bleibt erhalten, enthält jetzt aber den gesendeten TX-Timestamp
-                "marker": tx_timestamp,
-
                 "ok_match": ok_match,
 
-                "rx_id": (rx.get("rx_id") if rx else None),
                 "node_timestamp": (rx.get("node_timestamp") if rx else None),
 
                 "rssi": (rx.get("rssi") if rx else None),
@@ -757,7 +746,6 @@ def run(ctx: ServiceContext, lora: str = "ask") -> None:
             "port": PORT,
             "baudrate": BAUDRATE,
             "measure_interval_s": MEASURE_INTERVAL_S,
-            "notes": "",
         })
         safe_commit(conn)
 
