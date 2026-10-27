@@ -188,7 +188,9 @@ import os, sys
 from urllib.parse import quote
 user, server, name = sys.argv[1:]
 password = quote(os.environ["DB_PASSWORD"], safe="")
-print(f"postgresql://{user}:{password}@{server}/{name}")
+# No SSL: the TLS handshake with the server hangs over tailscale (connect timeout),
+# and tailscale already encrypts the connection.
+print(f"postgresql://{user}:{password}@{server}/{name}?sslmode=disable")
 ' "$DB_USER" "$DB_SERVER" "$db_name")"
     export MAIN_TAILSCALE_DSN
 fi
