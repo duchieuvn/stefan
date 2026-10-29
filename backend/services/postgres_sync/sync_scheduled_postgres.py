@@ -7,7 +7,7 @@ Source/target pairs are named profiles configured in .env next to this file:
                                   defaults to the sensor database in backend/data_path.env
     <SOURCE>_<CONNECTION>_DSN     e.g. MAIN_TAILSCALE_DSN, REDUCED_LOCAL_DSN
 
-Rows are copied incrementally by key (rounds.round_id, measurement.id) in
+Rows are copied incrementally by key (lora_rounds.round_id, lora_measurement.id) in
 batches of BATCH_SIZE; existing rows are skipped (ON CONFLICT DO NOTHING).
 """
 
@@ -68,12 +68,12 @@ ROUNDS_SCHEMA = {
     "ok_links": "BIGINT",
     "total_links": "BIGINT",
     "timeouts": "BIGINT",
-    "setting_id": "BIGINT REFERENCES setting(setting_id)",
+    "setting_id": "BIGINT REFERENCES lora_setting(setting_id)",
 }
 MEASUREMENT_SCHEMA = {
     "id": "BIGINT PRIMARY KEY",
     "pc_ts": "TEXT NOT NULL",
-    "round_id": "BIGINT REFERENCES rounds(round_id)",
+    "round_id": "BIGINT REFERENCES lora_rounds(round_id)",
     "sender_id": "BIGINT",
     "receiver_id": "BIGINT",
     "ok_match": "BIGINT",
@@ -85,8 +85,8 @@ MEASUREMENT_SCHEMA = {
 # (max round_id, max measurement id); the same query works on SQLite and PostgreSQL.
 Position = tuple[int, int]
 POSITION_SQL = (
-    "SELECT (SELECT COALESCE(MAX(round_id), 0) FROM rounds), "
-    "(SELECT COALESCE(MAX(id), 0) FROM measurement)"
+    "SELECT (SELECT COALESCE(MAX(round_id), 0) FROM lora_rounds), "
+    "(SELECT COALESCE(MAX(id), 0) FROM lora_measurement)"
 )
 
 
@@ -149,14 +149,14 @@ def create_postgres_schema(pg: psycopg2.extensions.connection) -> None:
     """Create the destination tables when running against an empty database."""
     with pg, pg.cursor() as cursor:
         for table, schema in (
-            ("setting", SETTING_SCHEMA), ("rounds", ROUNDS_SCHEMA), ("measurement", MEASUREMENT_SCHEMA),
+            ("lora_setting", SETTING_SCHEMA), ("lora_rounds", ROUNDS_SCHEMA), ("lora_measurement", MEASUREMENT_SCHEMA),
         ):
             columns = ", ".join(f"{name} {type_}" for name, type_ in schema.items())
             cursor.execute(f"CREATE TABLE IF NOT EXISTS {table} ({columns})")
-        cursor.execute("CREATE INDEX IF NOT EXISTS measurement_round_id_idx ON measurement(round_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS lora_measurement_round_id_idx ON lora_measurement(round_id)")
         # Covering index for the RTI app's time-range aggregates (index-only scans).
         cursor.execute(
-            "CREATE INDEX IF NOT EXISTS measurement_pc_ts_idx ON measurement(pc_ts) "
+            "CREATE INDEX IF NOT EXISTS lora_measurement_pc_ts_idx ON lora_measurement(pc_ts) "
             "INCLUDE (sender_id, receiver_id, ok_match, rssi, round_id)"
         )
 
@@ -212,14 +212,14 @@ def sync_batch(src: sqlite3.Connection, pg: psycopg2.extensions.connection) -> P
     round_id, measurement_id = postgres_position(pg)
     # Settings are few; copy the ones the rounds below may reference.
     with pg.cursor() as cursor:
-        cursor.execute("SELECT COALESCE(MAX(setting_id), 0) FROM setting")
+        cursor.execute("SELECT COALESCE(MAX(setting_id), 0) FROM lora_setting")
         setting_id = int(cursor.fetchone()[0])
-    copy_batch(src, pg, "setting", tuple(SETTING_SCHEMA), "setting_id > ? ORDER BY setting_id", (setting_id,))
-    copy_batch(src, pg, "rounds", tuple(ROUNDS_SCHEMA), "round_id > ? ORDER BY round_id", (round_id,))
+    copy_batch(src, pg, "lora_setting", tuple(SETTING_SCHEMA), "setting_id > ? ORDER BY setting_id", (setting_id,))
+    copy_batch(src, pg, "lora_rounds", tuple(ROUNDS_SCHEMA), "round_id > ? ORDER BY round_id", (round_id,))
 
     round_id, _ = postgres_position(pg)
     copy_batch(
-        src, pg, "measurement", tuple(MEASUREMENT_SCHEMA),
+        src, pg, "lora_measurement", tuple(MEASUREMENT_SCHEMA),
         "id > ? AND (round_id IS NULL OR round_id <= ?) ORDER BY id",
         (measurement_id, round_id),
     )

@@ -1,9 +1,10 @@
-"""Rotation logger for firmware/slave_rotation: alternates LoRa rounds and CW rounds.
+"""Rotation logger for firmware/slave_rotation: alternates LoRa, CW and FSK rounds.
 
 One image on every node does both. The master decides which one is active:
 
   LoRa round: every node sends one packet (CMD 10), all others report RSSI/SNR (regs 100..115).
   CW round:   every node sends one carrier (CMD 30), all others measure RSSI (CMD 32, regs 130..135).
+  FSK round:  like a LoRa round (CMD 10, regs 100..115) but with GFSK packets; FSK has no SNR.
 
 Before every round the service writes the wanted mode to register 420 of all nodes and waits
 until register 421 reports it. A node that does not follow (rebooted, radio error, busy) is
@@ -12,6 +13,7 @@ mode the round is skipped.
 
 LoRa rounds are stored like main_senor_data.py does (setting, rounds, measurement), CW rounds
 like main_cw_data.py does (cw_rounds, cw_measurement) - same tables, no schema change.
+FSK rounds go to the new tables fsk_rounds / fsk_measurement (created if missing).
 
 Self-contained: nothing is imported from services/sensor_logger. A service for manage_services.py
 would only need run(ctx, lora="read"); started as a script it runs standalone (Ctrl+C stops it).
@@ -32,7 +34,7 @@ from config import *
 REG_CMD = 200
 CMD_LED_ON = 1
 CMD_LED_OFF = 2
-CMD_TX = 10                 # LoRa packet (LoRa mode)
+CMD_TX = 10                 # packet (LoRa or FSK mode)
 CMD_CW_START = 30           # CW carrier (CW mode)
 CMD_CW_STOP = 31
 CMD_RSSI_MEASURE = 32
@@ -52,11 +54,12 @@ REG_CW_TX_MS = 360          # 360 = carrier duration ms, 361 = measure duration 
 REG_RADIO = 400             # 400 = freq x10, 401 = power dBm, 402 = SF, 403 = BW kHz, 404 = CR
 REG_RADIO_APPLY = 410
 
-REG_MODE_REQ = 420          # 0 = LoRa, 1 = CW
-REG_MODE_ACTIVE = 421       # 0 = LoRa, 1 = CW, 0xFFFF = radio init failed
+REG_MODE_REQ = 420          # 0 = LoRa, 1 = CW, 2 = FSK
+REG_MODE_ACTIVE = 421       # 0 = LoRa, 1 = CW, 2 = FSK, 0xFFFF = radio init failed
 MODE_LORA = 0
 MODE_CW = 1
-MODE_NAMES = {MODE_LORA: "LoRa", MODE_CW: "CW"}
+MODE_FSK = 2
+MODE_NAMES = {MODE_LORA: "LoRa", MODE_CW: "CW", MODE_FSK: "FSK"}
 
 # Träger muss laufen, bis der letzte Empfänger fertig gemessen hat:
 # Messdauer + Zeit für die CMD-32-Writes an alle Empfänger + Reserve.
@@ -71,11 +74,13 @@ def cw_tx_ms(n_nodes: int) -> int:
 # =========================
 # SQLite
 # =========================
-MEASUREMENT_TABLE = "measurement"
-ROUNDS_TABLE = "rounds"
-SETTING_TABLE = "setting"
+MEASUREMENT_TABLE = "lora_measurement"
+ROUNDS_TABLE = "lora_rounds"
+SETTING_TABLE = "lora_setting"
 CW_MEASUREMENT_TABLE = "cw_measurement"
 CW_ROUNDS_TABLE = "cw_rounds"
+FSK_MEASUREMENT_TABLE = "fsk_measurement"
+FSK_ROUNDS_TABLE = "fsk_rounds"
 
 SETTING_COLUMNS = (
     "freq_mhz", "tx_power", "sf", "bw_khz", "cr_denom", "lora_applied",
@@ -185,6 +190,35 @@ def init_db(db_path: str) -> None:
         );
     """)
 
+    # FSK rounds (like measurement, but without snr: FSK has none)
+    cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS {quote_ident(FSK_MEASUREMENT_TABLE)} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pc_ts TEXT NOT NULL,
+            round_id INTEGER,
+            sender_id INTEGER,
+            receiver_id INTEGER,
+            ok_match INTEGER,
+            node_timestamp INTEGER,
+            rssi REAL
+        );
+    """)
+
+    cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS {quote_ident(FSK_ROUNDS_TABLE)} (
+            round_id INTEGER PRIMARY KEY,
+            pc_start TEXT,
+            pc_end TEXT,
+            duration_s REAL,
+            nodes_csv TEXT,
+            ok_links INTEGER,
+            total_links INTEGER,
+            timeouts INTEGER,
+            freq_mhz REAL,
+            tx_power INTEGER
+        );
+    """)
+
     con.commit()
     con.close()
 
@@ -246,6 +280,35 @@ def store_round(cur: sqlite3.Cursor, info: Dict[str, Any]) -> None:
         info.get("ok_links"), info.get("total_links"), info.get("timeouts"),
 
         info.get("setting_id"),
+    ))
+
+
+def store_fsk_measurement(cur: sqlite3.Cursor, row: Dict[str, Any]) -> None:
+    cur.execute(f"""
+        INSERT INTO {quote_ident(FSK_MEASUREMENT_TABLE)} (
+            pc_ts,
+            round_id, sender_id, receiver_id,
+            ok_match, node_timestamp,
+            rssi
+        ) VALUES (?, ?, ?, ?, ?, ?, ?);
+    """, (
+        row.get("pc_ts"),
+        row.get("round_id"), row.get("sender_id"), row.get("receiver_id"),
+        row.get("ok_match"), row.get("node_timestamp"),
+        row.get("rssi"),
+    ))
+
+
+def store_fsk_round(cur: sqlite3.Cursor, info: Dict[str, Any]) -> None:
+    cur.execute(f"""
+        INSERT OR REPLACE INTO {quote_ident(FSK_ROUNDS_TABLE)} (
+            round_id, pc_start, pc_end, duration_s, nodes_csv,
+            ok_links, total_links, timeouts, freq_mhz, tx_power
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    """, (
+        info.get("round_id"), info.get("pc_start"), info.get("pc_end"), info.get("duration_s"),
+        info.get("nodes_csv"), info.get("ok_links"), info.get("total_links"), info.get("timeouts"),
+        info.get("freq_mhz"), info.get("tx_power"),
     ))
 
 
@@ -565,7 +628,7 @@ def stop_all(client) -> None:
 
 
 # =========================
-# LoRa round (same flow as main_senor_data.py)
+# LoRa / FSK round (LoRa flow as in main_senor_data.py; FSK is the same flow in FSK mode)
 # =========================
 def read_rx_block(client, slave_id: int) -> Optional[Dict[str, Any]]:
     regs = read_regs(client, slave_id, RX_BLOCK_ADDR, RX_BLOCK_COUNT)
@@ -615,13 +678,16 @@ def send_led_cmd(client, sid: int, on: bool) -> None:
         raise RuntimeError(f"[Node {sid}] LED command failed")
 
 
-def lora_round(client, conn: sqlite3.Connection, round_id: int, setting_id: int,
-               nodes: List[int], ctx) -> Optional[Dict[str, Any]]:
+def packet_round(client, conn: sqlite3.Connection, round_id: int, setting_id: int,
+                 nodes: List[int], ctx, fsk: bool = False,
+                 radio_cfg: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """
-    One LoRa round among `nodes`; returns the stored round data, or None if ctx stops
-    in the middle (the round is then discarded).
+    One LoRa round (fsk=False) or FSK round (fsk=True) among `nodes`; returns the stored
+    round data, or None if ctx stops in the middle (the round is then discarded).
     """
     cur = conn.cursor()
+    label = "FSK" if fsk else "LoRa"
+    store_meas = store_fsk_measurement if fsk else store_measurement
 
     pc_start = now_iso()
     t_round0 = time.perf_counter()
@@ -632,7 +698,7 @@ def lora_round(client, conn: sqlite3.Connection, round_id: int, setting_id: int,
 
     if VERBOSE:
         log("")
-        log(f"========== LoRa ROUND {round_id} START ==========")
+        log(f"========== {label} ROUND {round_id} START ==========")
 
     for sid in nodes:
         try:
@@ -712,11 +778,12 @@ def lora_round(client, conn: sqlite3.Connection, round_id: int, setting_id: int,
             if VERBOSE and PRINT_LINK_LINE:
                 rssi_txt = f"{rx['rssi']:.1f}" if rx is not None else "None"
                 snr_txt = f"{rx['snr']:.1f}" if rx is not None else "None"
+                snr_part = "" if fsk else f" | SNR={snr_txt} dB"
                 log(f"{'OK' if ok_match else 'TIMEOUT'} {sender_id}->{receiver_id} | "
-                    f"RSSI={rssi_txt} dBm | SNR={snr_txt} dB")
+                    f"RSSI={rssi_txt} dBm{snr_part}")
 
             try:
-                store_measurement(cur, {
+                store_meas(cur, {
                     "pc_ts": now_iso(),
                     "round_id": round_id,
                     "sender_id": sender_id,
@@ -724,7 +791,7 @@ def lora_round(client, conn: sqlite3.Connection, round_id: int, setting_id: int,
                     "ok_match": ok_match,
                     "node_timestamp": (rx["node_timestamp"] if rx else None),
                     "rssi": (rx["rssi"] if rx else None),
-                    "snr": (rx["snr"] if rx else None),
+                    **({} if fsk else {"snr": (rx["snr"] if rx else None)}),
                 })
             except Exception as e:
                 log(f"[DB] store_measurement failed: {e}")
@@ -744,7 +811,7 @@ def lora_round(client, conn: sqlite3.Connection, round_id: int, setting_id: int,
 
     if aborted:
         conn.rollback()
-        log(f"[LoRa round {round_id}] stopped, round discarded")
+        log(f"[{label} round {round_id}] stopped, round discarded")
         return None
 
     duration_s = float(time.perf_counter() - t_round0)
@@ -761,12 +828,16 @@ def lora_round(client, conn: sqlite3.Connection, round_id: int, setting_id: int,
     }
 
     try:
-        store_round(cur, info)
+        if fsk:
+            cfg = radio_cfg or {}
+            store_fsk_round(cur, {**info, "freq_mhz": cfg.get("freq_mhz"), "tx_power": cfg.get("tx_power")})
+        else:
+            store_round(cur, info)
         safe_commit(conn)
     except Exception as e:
         log(f"[DB] store_round/commit failed: {e}")
 
-    log(f"[LoRa round {round_id}] ok={ok_links}/{total_links} timeouts={timeouts} dur={duration_s:.1f}s")
+    log(f"[{label} round {round_id}] ok={ok_links}/{total_links} timeouts={timeouts} dur={duration_s:.1f}s")
     return info
 
 
@@ -914,7 +985,7 @@ def warn_if_duty_cycle_exceeded() -> None:
     if CW_ROUNDS == 0:
         return
     tx_s = cw_tx_ms(len(NODES)) / 1000.0 * CW_ROUNDS
-    period_s = MEASURE_INTERVAL_S * (LORA_ROUNDS + CW_ROUNDS)
+    period_s = MEASURE_INTERVAL_S * (LORA_ROUNDS + CW_ROUNDS + FSK_ROUNDS)
     duty = tx_s / period_s
     if duty > DUTY_CYCLE_LIMIT:
         print(f"⚠️  Duty cycle: up to {tx_s:.1f} s of carrier per node every {period_s:.0f} s "
@@ -927,19 +998,20 @@ def warn_if_duty_cycle_exceeded() -> None:
 # =========================
 def run(ctx, lora: str = "read") -> None:
     """
-    Alternates LoRa and CW rounds until ctx stops.
+    Alternates LoRa, CW and FSK rounds until ctx stops.
 
     lora="read": no questions, radio settings are read from the first node
     lora="ask":  radio settings are asked on the terminal (default when started as a script)
     """
-    if LORA_ROUNDS < 0 or CW_ROUNDS < 0 or LORA_ROUNDS + CW_ROUNDS == 0:
-        raise RuntimeError("LORA_ROUNDS and CW_ROUNDS must not be negative and not both 0")
+    if min(LORA_ROUNDS, CW_ROUNDS, FSK_ROUNDS) < 0 or LORA_ROUNDS + CW_ROUNDS + FSK_ROUNDS == 0:
+        raise RuntimeError("LORA_ROUNDS, CW_ROUNDS and FSK_ROUNDS must not be negative and not all 0")
 
-    print("=== LoRa / CW rotation logger ===")
+    print("=== LoRa / CW / FSK rotation logger ===")
     print(f"DB: {DB_PATH}")
     print(f"PORT: {PORT} @ {BAUDRATE}")
     print(f"NODES: {NODES}")
-    print(f"Rotation: {LORA_ROUNDS} LoRa round(s), then {CW_ROUNDS} CW round(s)")
+    print(f"Rotation: {LORA_ROUNDS} LoRa round(s), then {CW_ROUNDS} CW round(s), "
+          f"then {FSK_ROUNDS} FSK round(s)")
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     init_db(DB_PATH)
@@ -965,7 +1037,7 @@ def run(ctx, lora: str = "read") -> None:
     try:
         cur = conn.cursor()
         next_id = {}
-        for kind, table in (("lora", ROUNDS_TABLE), ("cw", CW_ROUNDS_TABLE)):
+        for kind, table in (("lora", ROUNDS_TABLE), ("cw", CW_ROUNDS_TABLE), ("fsk", FSK_ROUNDS_TABLE)):
             row = cur.execute(f"SELECT MAX(round_id) FROM {quote_ident(table)};").fetchone()
             next_id[kind] = int(row[0] or 0) + 1
 
@@ -987,7 +1059,9 @@ def run(ctx, lora: str = "read") -> None:
 
         warn_if_duty_cycle_exceeded()
 
-        pattern = ["lora"] * LORA_ROUNDS + ["cw"] * CW_ROUNDS
+        pattern = ["lora"] * LORA_ROUNDS + ["cw"] * CW_ROUNDS + ["fsk"] * FSK_ROUNDS
+        kind_mode = {"lora": MODE_LORA, "cw": MODE_CW, "fsk": MODE_FSK}
+        kind_label = {kind: MODE_NAMES[m] for kind, m in kind_mode.items()}
         step = 0
 
         print("\n=== Start rotation loop ===")
@@ -998,8 +1072,8 @@ def run(ctx, lora: str = "read") -> None:
             started = datetime.now()
             kind = pattern[step % len(pattern)]
             step += 1
-            mode = MODE_LORA if kind == "lora" else MODE_CW
-            label = "LoRa" if kind == "lora" else "CW"
+            mode = kind_mode[kind]
+            label = kind_label[kind]
 
             ctx.report(activity=f"switching to {label} mode")
             nodes = sync_nodes(client, mode, ctx)
@@ -1012,10 +1086,11 @@ def run(ctx, lora: str = "read") -> None:
             else:
                 round_id = next_id[kind]
                 ctx.report(activity=f"{label} round {round_id} running")
-                if kind == "lora":
-                    info = lora_round(client, conn, round_id, setting_id, nodes, ctx)
-                else:
+                if kind == "cw":
                     info = cw_round(client, conn, round_id, radio_cfg, nodes, ctx)
+                else:
+                    info = packet_round(client, conn, round_id, setting_id, nodes, ctx,
+                                        fsk=(kind == "fsk"), radio_cfg=radio_cfg)
                 if info is None:
                     break
                 next_id[kind] += 1
@@ -1029,7 +1104,7 @@ def run(ctx, lora: str = "read") -> None:
 
             dt = time.perf_counter() - t0
             sleep_s = max(0.0, float(MEASURE_INTERVAL_S) - dt)
-            next_label = "LoRa" if pattern[step % len(pattern)] == "lora" else "CW"
+            next_label = kind_label[pattern[step % len(pattern)]]
             ctx.report(activity=f"waiting for {next_label} round",
                        next_run=datetime.now() + timedelta(seconds=sleep_s))
             ctx.wait(sleep_s)

@@ -3,7 +3,7 @@
 Core logic for the dynamic temporal RTI view (no Tk / Matplotlib).
 
 Sections:
-    SQL          - queries against the `measurement` table
+    SQL          - queries against the `lora_measurement` table
     Model        - reconstruction grid, link weights W, Laplacian Q, IDW operator
     Measurements - time windows, available dates, per-link RSSI statistics
     Solver       - block-tridiagonal temporal solver
@@ -47,12 +47,12 @@ def setup_logging(level: int = logging.INFO) -> None:
 # SQL (SQLite `?` placeholders)
 # ==========================================================================
 
-DATA_RANGE = "SELECT MIN(pc_ts), MAX(pc_ts) FROM measurement"
+DATA_RANGE = "SELECT MIN(pc_ts), MAX(pc_ts) FROM lora_measurement"
 
 # Params: (since_day,)
 DISTINCT_DAYS = """
     SELECT DISTINCT substr(pc_ts, 1, 10) AS day
-    FROM measurement
+    FROM lora_measurement
     WHERE pc_ts IS NOT NULL
       AND pc_ts >= ?
     ORDER BY day ASC
@@ -64,7 +64,7 @@ DAY_WINDOW_COVERAGE = """
         substr(pc_ts, 1, 10) AS day,
         MIN(pc_ts) AS first_ts,
         MAX(pc_ts) AS last_ts
-    FROM measurement
+    FROM lora_measurement
     WHERE pc_ts IS NOT NULL
       AND pc_ts >= ?
       AND substr(pc_ts, 12, 5) >= ?
@@ -76,7 +76,7 @@ DAY_WINDOW_COVERAGE = """
 # Params: (start_ts, end_ts)
 MEASUREMENT_IN_RANGE = """
     SELECT sender_id, receiver_id, ok_match, rssi, round_id, pc_ts
-    FROM measurement
+    FROM lora_measurement
     WHERE pc_ts IS NOT NULL
         AND pc_ts >= ?
         AND pc_ts <= ?

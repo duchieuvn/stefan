@@ -10,7 +10,7 @@ from pathlib import Path
 class SQLiteDatabase:
     """Hands out short-lived connections to a local SQLite file."""
 
-    REQUIRED_TABLE = "measurement"
+    REQUIRED_TABLE = "lora_measurement"
 
     def __init__(self, path: Path):
         self.path = path
@@ -39,9 +39,9 @@ class SQLiteDatabase:
     def _ensure_indexes(self) -> None:
         try:
             with sqlite3.connect(self.path, timeout=10.0) as con:
-                con.execute("CREATE INDEX IF NOT EXISTS idx_measurement_pc_ts ON measurement(pc_ts)")
-                con.execute("CREATE INDEX IF NOT EXISTS idx_measurement_link_time ON measurement(sender_id, receiver_id, pc_ts)")
-                con.execute("CREATE INDEX IF NOT EXISTS idx_measurement_ok_time ON measurement(ok_match, pc_ts)")
+                con.execute("CREATE INDEX IF NOT EXISTS idx_lora_measurement_pc_ts ON lora_measurement(pc_ts)")
+                con.execute("CREATE INDEX IF NOT EXISTS idx_lora_measurement_link_time ON lora_measurement(sender_id, receiver_id, pc_ts)")
+                con.execute("CREATE INDEX IF NOT EXISTS idx_lora_measurement_ok_time ON lora_measurement(ok_match, pc_ts)")
         except sqlite3.OperationalError as e:
             # E.g. a read-only file or filesystem: queries still work, just slower.
             logging.warning("Could not create SQLite indexes: %s", e)

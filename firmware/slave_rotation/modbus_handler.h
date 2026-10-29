@@ -177,7 +177,7 @@ void updateLoRaInfo(const String& idStr, uint32_t timestamp, float rssi, float s
   mb.Hreg(TIME_REG_BASE + 1, (uint16_t)(timestamp & 0xFFFF));
 
   mb.Hreg(RSSI_REGISTER, (int16_t)(rssi * 10.0));
-  mb.Hreg(SNR_REGISTER,  (int16_t)(snr  * 10.0));
+  mb.Hreg(SNR_REGISTER,  isnan(snr) ? 0 : (int16_t)(snr * 10.0));   // FSK: kein SNR → 0
 
   Serial.println("--- Modbus Update ---");
   Serial.printf("Empfangene ID: %u\n", receivedId);
@@ -245,7 +245,7 @@ void triggerMeasurement() {
 
   int result = radio.transmit(msg);
   if (result == RADIOLIB_ERR_NONE) {
-    Serial.println("✅ Messdaten über LoRa gesendet.");
+    Serial.println("✅ Messdaten gesendet.");
   } else {
     Serial.printf("❌ Sende-Fehler: %d\n", result);
   }
@@ -257,7 +257,15 @@ void triggerMeasurement() {
 // (Der Master prüft vor jeder Runde Register 421; das hier ist nur das Sicherheitsnetz.)
 static inline bool _needMode(RadioMode mode, const char* what) {
   if (radioReady() && radioMode() == mode) return true;
-  Serial.printf("⚠️ %s ignoriert: Radio nicht im %s-Modus\n", what, mode == RADIO_MODE_LORA ? "LoRa" : "CW");
+  Serial.printf("⚠️ %s ignoriert: Radio nicht im %s-Modus\n", what,
+                mode == RADIO_MODE_LORA ? "LoRa" : mode == RADIO_MODE_FSK ? "FSK" : "CW");
+  return false;
+}
+
+// Paket senden geht in LoRa und FSK
+static inline bool _needPacketMode(const char* what) {
+  if (radioReady() && _isPacketMode(radioMode())) return true;
+  Serial.printf("⚠️ %s ignoriert: Radio nicht im LoRa-/FSK-Modus\n", what);
   return false;
 }
 
@@ -268,7 +276,7 @@ void modbusTask() {
 
   // Betriebsart: Wunsch des Masters übernehmen (umgeschaltet wird in radioTask()), Ist-Zustand melden
   uint16_t modeReq = mb.Hreg(RADIO_MODE_REQ_REGISTER);
-  if (modeReq == RADIO_MODE_LORA || modeReq == RADIO_MODE_CW) radioRequestMode((RadioMode)modeReq);
+  if (modeReq == RADIO_MODE_LORA || modeReq == RADIO_MODE_CW || modeReq == RADIO_MODE_FSK) radioRequestMode((RadioMode)modeReq);
   mb.Hreg(RADIO_MODE_ACTIVE_REGISTER, radioActiveReg());
   mb.Hreg(CW_STATE_REGISTER, cwState());
 
@@ -292,8 +300,8 @@ void modbusTask() {
         break;
 
       case 10:
-        Serial.println("📡 Befehl: LoRa-Broadcast");
-        if (_needMode(RADIO_MODE_LORA, "LoRa-Broadcast")) triggerMeasurement();
+        Serial.println("📡 Befehl: Paket-Broadcast (LoRa/FSK)");
+        if (_needPacketMode("Paket-Broadcast")) triggerMeasurement();
         break;
 
       case 20: {

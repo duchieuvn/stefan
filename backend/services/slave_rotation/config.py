@@ -55,7 +55,7 @@ RX_POLL_S = float(env.get("RX_POLL_S", "0.2"))
 RX_STABLE_READS = int(env.get("RX_STABLE_READS", "2"))
 RX_STABLE_GAP_S = float(env.get("RX_STABLE_GAP_S", "0.05"))
 
-# Pause between two rounds (LoRa or CW): a round starts every MEASURE_INTERVAL_S
+# Pause between two rounds (LoRa, CW or FSK): a round starts every MEASURE_INTERVAL_S
 MEASURE_INTERVAL_S = float(env.get("MEASURE_INTERVAL_S", "60"))
 
 # CW round
@@ -64,9 +64,11 @@ CW_TX_MAX_MS = int(env.get("CW_TX_MAX_MS", "10000"))        # Firmware-Limit (CW
 CW_RESULT_TIMEOUT_S = float(env.get("CW_RESULT_TIMEOUT_S", "3"))
 CW_POLL_S = float(env.get("CW_POLL_S", "0.1"))
 
-# Rotation: LORA_ROUNDS lora rounds, then CW_ROUNDS cw rounds, then again ...
+# Rotation: LORA_ROUNDS lora rounds, then CW_ROUNDS cw rounds, then FSK_ROUNDS fsk rounds, then again ...
+# (FSK needs firmware with RADIO_MODE_FSK; leave at 0 for older firmware)
 LORA_ROUNDS = int(env.get("LORA_ROUNDS", "1"))
 CW_ROUNDS = int(env.get("CW_ROUNDS", "1"))
+FSK_ROUNDS = int(env.get("FSK_ROUNDS", "0"))
 
 # Mode switch: wait this long for all nodes to report the new mode (register 421), then retry
 MODE_SWITCH_TIMEOUT_S = float(env.get("MODE_SWITCH_TIMEOUT_S", "5"))

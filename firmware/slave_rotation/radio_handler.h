@@ -7,9 +7,10 @@
 #include "oled_ui.h"
 
 // ============================================================
-// Ein SX1262, zwei Betriebsarten – der Master schaltet im Wechsel um:
+// Ein SX1262, drei Betriebsarten – der Master schaltet im Wechsel um:
 //  - RADIO_MODE_LORA: Pakete "id@ts@payload" senden/empfangen (IRQ, non-blocking RX)
 //  - RADIO_MODE_CW:   unmodulierter Träger senden / RSSI messen (FSK-Modem als Träger)
+//  - RADIO_MODE_FSK:  wie LoRa, aber GFSK-Pakete (Sync-Wort, CRC); kein SNR
 // LoRa hört kein FSK und umgekehrt → alle Nodes müssen im selben Modus sein.
 // Der Modus wird über Register 420 gewünscht und in Register 421 gemeldet
 // (siehe modbus_handler.h); umgeschaltet wird nur im Leerlauf, nie mitten in
@@ -94,6 +95,22 @@
   #define CW_RSSI_SAMPLE_MS 5
 #endif
 
+// FSK-Paket-Parameter (nur im FSK-Modus, wie slave_fsk/fsk_handler.h)
+#ifndef FSK_BITRATE_KBPS
+  #define FSK_BITRATE_KBPS 4.8f
+#endif
+#ifndef FSK_FREQ_DEV_KHZ
+  #define FSK_FREQ_DEV_KHZ 5.0f
+#endif
+// Muss ein SX126x-Wert sein (4.8, 5.8, 7.3, ... 39.0, 46.9, ... 467.0)
+#ifndef FSK_RX_BW_KHZ
+  #define FSK_RX_BW_KHZ 39.0f
+#endif
+#ifndef FSK_PREAMBLE_LEN
+  #define FSK_PREAMBLE_LEN 16   // in Bits
+#endif
+static uint8_t _fskSyncWord[] = {0x2D, 0xD4};
+
 // ============================================================
 // Externe Dinge (werden woanders definiert)
 // ============================================================
@@ -111,8 +128,12 @@ void updateRssiResult(float avg, float minV, float maxV, uint16_t samples);
 // ============================================================
 enum RadioMode : uint8_t {
   RADIO_MODE_LORA = 0,
-  RADIO_MODE_CW   = 1
+  RADIO_MODE_CW   = 1,
+  RADIO_MODE_FSK  = 2
 };
+
+// LoRa und FSK empfangen/senden Pakete (DIO1-IRQ); CW nicht
+static inline bool _isPacketMode(RadioMode m) { return m == RADIO_MODE_LORA || m == RADIO_MODE_FSK; }
 // Statt eines Modus im "aktiv"-Register, solange das Radio nicht initialisiert ist
 static const uint16_t RADIO_MODE_FAILED = 0xFFFF;
 
@@ -258,7 +279,7 @@ inline void runReceiver() {
 
   if (state == RADIOLIB_ERR_NONE) {
     float rssi = radio.getRSSI();
-    float snr  = radio.getSNR();
+    float snr  = (_radioMode == RADIO_MODE_FSK) ? NAN : radio.getSNR();   // FSK hat kein SNR
     _handleNewMessage(msg, rssi, snr);
   }
 
@@ -432,6 +453,15 @@ inline bool radioSetMode(RadioMode mode) {
       radio.setBandwidth(_radioCfg.bwKhz);
       radio.setCodingRate(_radioCfg.cr);
     }
+  } else if (mode == RADIO_MODE_FSK) {
+    st = radio.beginFSK(_radioCfg.freqMHz, (float)FSK_BITRATE_KBPS, (float)FSK_FREQ_DEV_KHZ,
+                        (float)FSK_RX_BW_KHZ, _radioCfg.powerDbm, (uint16_t)FSK_PREAMBLE_LEN);
+    if (st == RADIOLIB_ERR_NONE) {
+      radio.setDio2AsRfSwitch(true);
+      radio.setDataShaping(RADIOLIB_SHAPING_0_5);   // GFSK, BT = 0.5
+      radio.setSyncWord(_fskSyncWord, sizeof(_fskSyncWord));
+      radio.setCRC(2);
+    }
   } else {
     st = radio.beginFSK(_radioCfg.freqMHz, (float)CW_BITRATE_KBPS, (float)CW_FREQ_DEV_KHZ,
                         (float)CW_RX_BW_KHZ, _radioCfg.powerDbm);
@@ -441,7 +471,9 @@ inline bool radioSetMode(RadioMode mode) {
   }
 
 #if RADIO_DEBUG
-  Serial.printf("[Radio] %s -> %d\n", mode == RADIO_MODE_LORA ? "begin (LoRa)" : "beginFSK (CW)", st);
+  Serial.printf("[Radio] %s -> %d\n",
+                mode == RADIO_MODE_LORA ? "begin (LoRa)" :
+                mode == RADIO_MODE_FSK  ? "beginFSK (FSK)" : "beginFSK (CW)", st);
 #endif
   if (st != RADIOLIB_ERR_NONE) {
     _radioReady = false;
@@ -451,7 +483,7 @@ inline bool radioSetMode(RadioMode mode) {
 
   radio.setDio1Action(_onLoraDio1);   // im CW-Modus bleibt _loraIrqEnabled false
   radio.startReceive();
-  _loraIrqEnabled = (mode == RADIO_MODE_LORA);
+  _loraIrqEnabled = _isPacketMode(mode);
 
   _radioMode = mode;
   _radioReady = true;
@@ -464,6 +496,13 @@ inline bool radioSetMode(RadioMode mode) {
     Serial.printf("  SF     : %d\n", _radioCfg.sf);
     Serial.printf("  BW     : %.0f kHz\n", _radioCfg.bwKhz);
     Serial.printf("  CR     : 4/%d\n", _radioCfg.cr);
+  } else if (mode == RADIO_MODE_FSK) {
+    Serial.println("⚙️  FSK Settings:");
+    Serial.printf("  Freq   : %.3f MHz\n", _radioCfg.freqMHz);
+    Serial.printf("  Power  : %d dBm\n", _radioCfg.powerDbm);
+    Serial.printf("  Bitrate: %.1f kbps\n", (float)FSK_BITRATE_KBPS);
+    Serial.printf("  FreqDev: %.1f kHz\n", (float)FSK_FREQ_DEV_KHZ);
+    Serial.printf("  RX BW  : %.1f kHz\n", (float)FSK_RX_BW_KHZ);
   } else {
     Serial.println("⚙️  CW Settings:");
     Serial.printf("  Freq   : %.3f MHz\n", _radioCfg.freqMHz);
@@ -493,7 +532,7 @@ inline bool radioApplySettings(const RadioSettings& s) {
     radio.setCodingRate(s.cr);
   }
   radio.startReceive();
-  _loraIrqEnabled = (_radioMode == RADIO_MODE_LORA);
+  _loraIrqEnabled = _isPacketMode(_radioMode);
 
 #if RADIO_DEBUG
   Serial.println("⚙️  Übernehme Radio-Konfiguration:");
@@ -524,7 +563,7 @@ inline void radioTask(bool allowModeSwitch = true) {
   }
 
   if (!_radioReady) return;
-  if (_radioMode == RADIO_MODE_LORA) {
+  if (_isPacketMode(_radioMode)) {
     runReceiver();
   } else {
     cwTask();

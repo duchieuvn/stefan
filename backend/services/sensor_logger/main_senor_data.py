@@ -17,9 +17,9 @@ from config import *
 # =========================
 # SQLite helpers
 # =========================
-MEASUREMENT_TABLE = "measurement"
-ROUNDS_TABLE = "rounds"
-SETTING_TABLE = "setting"
+MEASUREMENT_TABLE = "lora_measurement"
+ROUNDS_TABLE = "lora_rounds"
+SETTING_TABLE = "lora_setting"
 
 SETTING_COLUMNS = (
     "freq_mhz", "tx_power", "sf", "bw_khz", "cr_denom", "lora_applied",
@@ -725,7 +725,7 @@ def run(ctx: ServiceContext, lora: str = "ask") -> None:
     try:
         cur = conn.cursor()
         try:
-            row = cur.execute("SELECT MAX(round_id) FROM rounds;").fetchone()
+            row = cur.execute(f"SELECT MAX(round_id) FROM {ROUNDS_TABLE};").fetchone()
             next_round = int(row[0] or 0) + 1
         except Exception:
             next_round = 1

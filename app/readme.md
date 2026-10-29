@@ -113,7 +113,7 @@ To get updated sequences that include new data, the `precompute_sequences.py` sc
 ## Module layout (`app/`)
 
 Run everything from inside `app/`. On startup `main.py` asks for the path of
-the local SQLite `.db` file (it needs a `measurement` table); there is no
+the local SQLite `.db` file (it needs a `lora_measurement` table); there is no
 download and no other database backend.
 
 - `main.py` — Tk viewer (reference-day and sequence sliders). Asks for the

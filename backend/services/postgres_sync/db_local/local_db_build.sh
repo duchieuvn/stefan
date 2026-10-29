@@ -36,7 +36,7 @@ echo "3. Creating tables and indexes..."
 sudo -u postgres psql -v ON_ERROR_STOP=1 --dbname="$POSTGRES_DB" <<-EOSQL
     SET ROLE holzofen;
 
-    CREATE TABLE setting (
+    CREATE TABLE lora_setting (
         setting_id BIGINT PRIMARY KEY,
         created_at TEXT NOT NULL,
         freq_mhz DOUBLE PRECISION,
@@ -50,7 +50,7 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 --dbname="$POSTGRES_DB" <<-EOSQL
         measure_interval_s DOUBLE PRECISION
     );
 
-    CREATE TABLE rounds (
+    CREATE TABLE lora_rounds (
         round_id BIGINT PRIMARY KEY,
         pc_start TEXT,
         pc_end TEXT,
@@ -59,13 +59,13 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 --dbname="$POSTGRES_DB" <<-EOSQL
         ok_links BIGINT,
         total_links BIGINT,
         timeouts BIGINT,
-        setting_id BIGINT REFERENCES setting(setting_id)
+        setting_id BIGINT REFERENCES lora_setting(setting_id)
     );
 
-    CREATE TABLE measurement (
+    CREATE TABLE lora_measurement (
         id BIGINT PRIMARY KEY,
         pc_ts TEXT NOT NULL,
-        round_id BIGINT REFERENCES rounds(round_id),
+        round_id BIGINT REFERENCES lora_rounds(round_id),
         sender_id BIGINT,
         receiver_id BIGINT,
         ok_match BIGINT,
@@ -74,9 +74,9 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 --dbname="$POSTGRES_DB" <<-EOSQL
         snr DOUBLE PRECISION
     );
 
-    CREATE INDEX measurement_round_id_idx ON measurement(round_id);
+    CREATE INDEX lora_measurement_round_id_idx ON lora_measurement(round_id);
     -- Covering index for the RTI app's time-range aggregates (index-only scans).
-    CREATE INDEX measurement_pc_ts_idx ON measurement(pc_ts)
+    CREATE INDEX lora_measurement_pc_ts_idx ON lora_measurement(pc_ts)
         INCLUDE (sender_id, receiver_id, ok_match, rssi, round_id);
 EOSQL
 

@@ -120,8 +120,8 @@ PRINT_LINK_LINE = True
 # =========================
 # SQLite helpers
 # =========================
-MEASUREMENT_TABLE = "measurement"
-ROUNDS_TABLE = "rounds"
+MEASUREMENT_TABLE = "lora_measurement"
+ROUNDS_TABLE = "lora_rounds"
 
 
 def connect_db(db_path: str, timeout_s: float = 30.0) -> sqlite3.Connection:
@@ -956,7 +956,7 @@ def main():
 
     cur = conn.cursor()
     try:
-        row = cur.execute("SELECT MAX(round_id) FROM rounds;").fetchone()
+        row = cur.execute(f"SELECT MAX(round_id) FROM {ROUNDS_TABLE};").fetchone()
         next_round = int(row[0] or 0) + 1
     except Exception:
         next_round = 1
