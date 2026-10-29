@@ -1,7 +1,15 @@
 from pymodbus.client import ModbusSerialClient
 from pymodbus.exceptions import ModbusIOException, ModbusException
+import getpass
+import hashlib
+import os
+import re
+import shutil
+import subprocess
+import tempfile
 import time
 import logging
+import urllib.request
 from datetime import datetime
 
 # ---------- LOGGING UNTERDRÜCKEN ----------
@@ -13,7 +21,7 @@ PORT = '/dev/ttyUSB0'  # Windows: richtiger COM-Port
 
 BAUDRATE = 9600
 CMD_REGISTER = 200
-SLAVE_IDS = [10, 11, 12]  # IDs deiner Knoten (wird durch Bus-Scan ersetzt)
+SLAVE_IDS = [10, 11, 12]  # IDs deiner Knoten (wird durch Bus-Scan [s] ersetzt)
 
 # ID-Register / Befehl zum Aendern der ID (siehe slave/modbus_handler.h)
 OWN_ID_REG = 10
@@ -27,12 +35,46 @@ BROADCAST_ID = 0      # alle Slaves fuehren aus, keiner antwortet
 
 # Bus-Scan: kurzer Timeout ohne Retries, sonst dauert ein Scan ueber 1..247 Minuten
 SCAN_TIMEOUT = 0.2
-SCAN_FIRST, SCAN_LAST = 1, 247  # Bereich fuer den Scan beim Start; enger = schneller
 
 # BME-Register
 BME_TEMP_REG = 120   # °C ×100, int16
 BME_HUM_REG  = 121   # % ×100, uint16
 BME_PRESS_REG = 122  # hPa ×10, uint16
+
+# OTA-Update ueber WLAN (siehe slave/ota_handler.h)
+OTA_STATUS_REG = 500          # 500..504 = Status, Fortschritt, Detail, letztes Ergebnis, letztes Detail
+OTA_SSID_LEN_REG, OTA_SSID_MAX = 510, 32    # Laengenregister, danach 2 ASCII-Bytes pro Register
+OTA_PASS_LEN_REG, OTA_PASS_MAX = 530, 64
+OTA_URL_LEN_REG, OTA_URL_MAX = 570, 160
+OTA_MD5_REG = 660             # 16 Register = 32 Hex-Zeichen, alles 0 = keine Pruefung
+CMD_OTA_START = 50
+CMD_OTA_ABORT = 51
+OTA_DEFAULT_URL = "https://github.com/duchieuvn/stefan/releases/latest/download/slave.bin"
+OTA_NODE_TIMEOUT = 300        # s pro Slave (WLAN + Download + Flashen)
+OTA_NO_START_TIMEOUT = 10     # s: so lange darf der Status nach CMD 50 auf 0 bleiben
+OTA_REBOOT_TIMEOUT = 40       # s: Wartezeit auf den Neustart nach erfolgreichem Update
+OTA_APP_IMAGE_MAGIC = 0xE9    # erstes Byte eines ESP32-App-Images
+OTA_MAX_APP_SIZE = 4 * 1024 * 1024
+OTA_STATUS_TEXT = {
+    1: "verbinde mit WLAN",
+    2: "Download",
+    3: "pruefe Image",
+    4: "fertig, Neustart",
+    20: "WLAN fehlgeschlagen",
+    21: "Download fehlgeschlagen (HTTP)",
+    22: "kein Platz fuer das Image (Partitionsschema?)",
+    23: "Download oder Flash-Schreiben fehlgeschlagen",
+    24: "Image-Pruefung fehlgeschlagen (defekter Download oder MD5 falsch)",
+    25: "abgebrochen",
+    26: "ungueltige Parameter (SSID oder URL)",
+}
+OTA_WIFI_TEXT = {1: "SSID nicht gefunden", 4: "falsches Passwort?", 6: "getrennt"}
+
+# Firmware bauen und als GitHub-Release veroeffentlichen (braucht arduino-cli und gh)
+SKETCH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "slave_rotation")
+FQBN = "esp32:esp32:heltec_wifi_lora_32_V3"   # Heltec WiFi LoRa 32 (V3), Partitionsschema default_8MB (OTA-faehig)
+ARDUINO_CLI_HINT = "https://arduino.github.io/arduino-cli/latest/installation/ (ESP32-Core ist schon von der IDE da)"
+GH_HINT = "sudo apt install gh, dann: gh auth login"
 
 # ---------- MODBUS CLIENT ----------
 client = ModbusSerialClient(
@@ -446,6 +488,323 @@ def change_id_by_mac():
         return
     print(f"Keine Antwort unter ID {new_id}. MAC richtig? Board mit neuer Firmware? Mit [s] scannen.")
 
+# ---------- OTA-UPDATE ----------
+def read_regs(slave_id, address, count):
+    """Register lesen; None bei keiner Antwort oder Fehler."""
+    try:
+        res = client.read_holding_registers(address=address, count=count, device_id=slave_id)
+    except Exception:
+        return None
+    if res is None or res.isError():
+        return None
+    return list(res.registers)
+
+def write_regs(slave_id, address, values):
+    """Register schreiben; False bei keiner Antwort oder Fehler."""
+    try:
+        res = client.write_registers(address, values, device_id=slave_id)
+    except Exception:
+        return False
+    return res is not None and not res.isError()
+
+def pack_bytes(data):
+    """2 Bytes pro Register, High-Byte zuerst (wie PAYLOAD_DATA_BASE)."""
+    return [(data[i] << 8) | (data[i + 1] if i + 1 < len(data) else 0) for i in range(0, len(data), 2)]
+
+def fetch_md5(url):
+    """Laedt url hier herunter (TLS geprueft, Redirects werden verfolgt); gibt (MD5-Hex, Groesse) zurueck."""
+    request = urllib.request.Request(url, headers={"User-Agent": "stefan-ota"})
+    md5, size, first = hashlib.md5(), 0, b""
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            while chunk := response.read(65536):
+                if not first:
+                    first = chunk[:1]
+                md5.update(chunk)
+                size += len(chunk)
+    except OSError as e:
+        raise ValueError(f"Download von {url} fehlgeschlagen: {e}") from None
+    if first != bytes([OTA_APP_IMAGE_MAGIC]) or size > OTA_MAX_APP_SIZE:
+        raise ValueError(f"{url} ist kein ESP32-App-Image ({size} Bytes); die .ino.bin hochladen, "
+                         f"nicht die merged- oder bootloader-.bin")
+    return md5.hexdigest(), size
+
+def ota_one_node(slave_id, ssid, password, url, md5):
+    """Update bei einem Slave starten und bis zum Ende verfolgen. Gibt (ok, Text) zurueck."""
+    status = read_regs(slave_id, OTA_STATUS_REG, 1)
+    if status is None:
+        return False, "keine Antwort oder keine OTA-Register (Firmware ohne OTA, z. B. slave_cw: per USB flashen)"
+    if status[0] in (1, 2, 3):
+        return False, "es laeuft schon ein Update"
+
+    md5_bytes = (md5.encode() if md5 else b"").ljust(32, b"\0")
+    sent = (write_regs(slave_id, OTA_SSID_LEN_REG, [len(ssid)] + pack_bytes(ssid))
+            and write_regs(slave_id, OTA_PASS_LEN_REG, [len(password)] + pack_bytes(password))
+            and write_regs(slave_id, OTA_URL_LEN_REG, [len(url)] + pack_bytes(url))
+            and write_regs(slave_id, OTA_MD5_REG, pack_bytes(md5_bytes))
+            and write_regs(slave_id, CMD_REGISTER, [CMD_OTA_START]))
+    if not sent:
+        return False, "Parameter oder Startbefehl konnten nicht geschrieben werden"
+
+    t0 = time.time()
+    last_status, shown = None, None
+    while time.time() - t0 < OTA_NODE_TIMEOUT:
+        time.sleep(1)
+        regs = read_regs(slave_id, OTA_STATUS_REG, 3)
+        if regs is None:
+            if last_status in (3, 4):   # Slave startet gerade neu
+                break
+            continue
+        status, progress, detail = regs
+        last_status = status
+        if status == 0:
+            if time.time() - t0 > OTA_NO_START_TIMEOUT:
+                return False, "Update ist nicht gestartet"
+            continue
+
+        text = OTA_STATUS_TEXT.get(status, f"Status {status}")
+        mark = (status, progress // 10 if status == 2 else 0)
+        if mark != shown:
+            shown = mark
+            print(f"   [Slave {slave_id}] {text}" + (f" {progress} %" if status == 2 else ""))
+        if status >= 20:
+            if status == 20 and detail:
+                text += f" ({OTA_WIFI_TEXT.get(detail, detail)})"
+            elif status == 21 and detail:
+                text += f" (HTTP {detail})"
+            elif detail:
+                text += f" (Detail {detail})"
+            return False, text
+        if status == 4:
+            break
+    if last_status not in (3, 4):
+        return False, "Zeitueberschreitung"
+
+    # Nach dem Neustart steht der Status wieder auf 0, das Ergebnis liegt in Reg 503/504 (NVS)
+    time.sleep(3)
+    deadline = time.time() + OTA_REBOOT_TIMEOUT
+    while time.time() < deadline:
+        regs = read_regs(slave_id, OTA_STATUS_REG, 5)
+        if regs is not None and regs[0] == 0:
+            if regs[3] == 4:
+                return True, "fertig, Slave laeuft mit der neuen Firmware (ID bleibt erhalten)"
+            return False, f"Slave meldet sich zurueck, letztes Ergebnis {regs[3]} (Detail {regs[4]})"
+        if regs is not None and regs[0] >= 20:
+            return False, OTA_STATUS_TEXT.get(regs[0], f"Status {regs[0]}")
+        time.sleep(1)
+    return False, "keine Antwort nach dem Neustart"
+
+def ask_wifi():
+    """WLAN-Zugang fuer den Download abfragen; gibt (SSID, Passwort) als Bytes zurueck, None bei ungueltiger Eingabe."""
+    ssid = input("WLAN-SSID (dort laedt der Slave die Firmware): ").strip().encode()
+    if not ssid or len(ssid) > OTA_SSID_MAX:
+        print(f"Ungueltige SSID (1–{OTA_SSID_MAX} Zeichen).")
+        return None
+    password = getpass.getpass("WLAN-Passwort (leer = offenes Netz): ").encode()
+    if len(password) > OTA_PASS_MAX:
+        print(f"Passwort zu lang (max. {OTA_PASS_MAX} Zeichen).")
+        return None
+    return ssid, password
+
+def ota_run(slave_ids, ssid, password, url_text, md5):
+    """Update nacheinander bei allen Slaves ausfuehren und das Ergebnis zusammenfassen."""
+    url = url_text.encode()
+    results = []
+    for sid in slave_ids:
+        print(f"\n[Slave {sid}] Update startet...")
+        try:
+            ok, text = ota_one_node(sid, ssid, password, url, md5)
+        except KeyboardInterrupt:
+            write_regs(sid, CMD_REGISTER, [CMD_OTA_ABORT])
+            print(f"\n[Slave {sid}] Abbruch gesendet (CMD {CMD_OTA_ABORT}). Restliche Slaves werden uebersprungen.")
+            break
+        print(f"[Slave {sid}] {'OK' if ok else 'FEHLER'}: {text}")
+        results.append((sid, ok, text))
+
+    if results:
+        print("\nErgebnis:")
+        for sid, ok, text in results:
+            print(f"   Slave {sid:>3}: {'OK    ' if ok else 'FEHLER'} {text}")
+
+def ota_update(slave_ids):
+    """Firmware per WLAN (OTA) auf die Slaves spielen, einen nach dem anderen.
+
+    Der Slave bekommt WLAN-Zugang und URL in seine Register, laedt die .bin selbst
+    (z. B. GitHub-Release), flasht sie und startet neu. Seine ID bleibt im NVS erhalten.
+    """
+    if not slave_ids:
+        print("Keine Slaves ausgewaehlt (erst mit [s] scannen).")
+        return
+
+    wifi = ask_wifi()
+    if wifi is None:
+        return
+    ssid, password = wifi
+    url_text = input(f"Firmware-URL (https, .ino.bin) [{OTA_DEFAULT_URL}]: ").strip() or OTA_DEFAULT_URL
+    if not url_text.startswith("http") or len(url_text.encode()) > OTA_URL_MAX:
+        print(f"Ungueltige URL (http(s)://..., max. {OTA_URL_MAX} Zeichen).")
+        return
+
+    md5 = None
+    if input("Datei vorab hier laden und pruefen (MD5 geht an die Slaves)? [J/n]: ").strip().lower() != 'n':
+        try:
+            md5, size = fetch_md5(url_text)
+        except ValueError as e:
+            print(e)
+            return
+        print(f"Datei ok: {size} Bytes, MD5 {md5}")
+
+    answer = input(f"Firmware von Slave(s) {slave_ids} per WLAN '{ssid.decode()}' aktualisieren? [j/N]: ")
+    if answer.strip().lower() not in ('j', 'y'):
+        print("Update abgebrochen.")
+        return
+
+    ota_run(slave_ids, ssid, password, url_text, md5)
+
+# ---------- FIRMWARE BAUEN + RELEASE ----------
+def run_tool(args, cwd=None):
+    """Externes Programm starten, seine Ausgabe live zeigen; True bei Exit-Code 0."""
+    print("   $ " + " ".join(args))
+    try:
+        return subprocess.run(args, cwd=cwd).returncode == 0
+    except OSError as e:
+        print(f"   Start fehlgeschlagen: {e}")
+        return False
+
+def capture(args, cwd=None):
+    """Externes Programm still ausfuehren; gibt seine Ausgabe zurueck, None bei Fehler."""
+    try:
+        res = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
+    except OSError:
+        return None
+    return res.stdout.strip() if res.returncode == 0 else None
+
+def parse_repo(text):
+    """'owner/name', https://github.com/owner/name(.git) oder git@github.com:owner/name.git -> 'owner/name'."""
+    text = text.strip()
+    m = re.search(r"github\.com[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", text)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+    return text if re.fullmatch(r"[\w.-]+/[\w.-]+", text) else None
+
+def compile_sketch(sketch_dir, out_dir):
+    """Sketch mit arduino-cli bauen; gibt den Pfad der App-.bin (<Sketch>.ino.bin) zurueck, None bei Fehler."""
+    name = os.path.basename(os.path.normpath(sketch_dir))
+    if not os.path.isfile(os.path.join(sketch_dir, name + ".ino")):
+        print(f"Kein Sketch in {sketch_dir} (erwartet {name}/{name}.ino).")
+        return None
+    print(f"\nKompiliere {name} fuer {FQBN} (beim ersten Mal dauert das mehrere Minuten)...")
+    if not run_tool(["arduino-cli", "compile", "--fqbn", FQBN, "--output-dir", out_dir, sketch_dir]):
+        print("Kompilieren fehlgeschlagen.")
+        return None
+    binary = os.path.join(out_dir, name + ".ino.bin")
+    if not os.path.isfile(binary):
+        print(f"{binary} wurde nicht erzeugt.")
+        return None
+    with open(binary, "rb") as f:
+        data = f.read()
+    if data[:1] != bytes([OTA_APP_IMAGE_MAGIC]) or len(data) > OTA_MAX_APP_SIZE:
+        print(f"{binary} ist kein gueltiges ESP32-App-Image ({len(data)} Bytes).")
+        return None
+    return binary
+
+def publish_release(repo, tag, binary, exists):
+    """Binary als Asset an das Release tag haengen (bestehendes Release: Datei ersetzen). True bei Erfolg."""
+    if exists:
+        return run_tool(["gh", "release", "upload", tag, binary, "--repo", repo, "--clobber"])
+    # --latest=false: sonst wird dieses Release zum "latest" und releases/latest/download/slave.bin
+    # (Standard-URL des Backends) liefe ins Leere
+    return run_tool(["gh", "release", "create", tag, binary, "--repo", repo, "--title", tag,
+                     "--notes", "Firmware (OTA)", "--latest=false"])
+
+def build_release_ota(slave_ids):
+    """Sketch bauen, als GitHub-Release veroeffentlichen und per OTA auf die Slaves spielen.
+
+    Erst wird nur gebaut und geprueft; veroeffentlicht und geflasht wird erst nach der Rueckfrage.
+    """
+    if not slave_ids:
+        print("Keine Slaves ausgewaehlt (erst mit [s] scannen).")
+        return
+    for tool, hint in (("arduino-cli", ARDUINO_CLI_HINT), ("gh", GH_HINT)):
+        if shutil.which(tool) is None:
+            print(f"'{tool}' nicht gefunden. Installation: {hint}")
+            return
+    if capture(["gh", "auth", "status"]) is None:
+        print("gh ist nicht angemeldet. Bitte ausfuehren: gh auth login (nicht mit sudo starten, sonst fehlt die Anmeldung)")
+        return
+
+    sketch_dir = os.path.abspath(input(f"Sketch-Ordner [{SKETCH_DIR}]: ").strip() or SKETCH_DIR)
+    default_repo = parse_repo(capture(["git", "remote", "get-url", "origin"], cwd=sketch_dir) or "")
+    repo = parse_repo(input(f"GitHub-Repo (owner/name oder URL) [{default_repo or '-'}]: ") or default_repo or "")
+    if repo is None:
+        print("Ungueltiges Repo (owner/name oder https://github.com/owner/name).")
+        return
+    tag = f"rotation-{datetime.now().strftime('%Y%m%d-%H%M')}"
+    tag = input(f"Release-Tag [{tag}]: ").strip() or tag
+    if not re.fullmatch(r"[\w.-]+", tag):
+        print("Ungueltiger Tag (Buchstaben, Ziffern, . _ -).")
+        return
+
+    private = capture(["gh", "repo", "view", repo, "--json", "isPrivate", "-q", ".isPrivate"])
+    if private is None:
+        print(f"Repo {repo} nicht gefunden oder kein Zugriff.")
+        return
+    if private == "true":
+        print(f"Repo {repo} ist privat: die Slaves koennen die Datei nicht ohne Anmeldung herunterladen.")
+        return
+    if capture(["git", "status", "--porcelain", "--", sketch_dir], cwd=sketch_dir):
+        print("Hinweis: der Sketch hat nicht eingecheckte Aenderungen. Die Binary kommt aus dem "
+              "Arbeitsordner, der Release-Tag im Repo enthaelt diese Quellen nicht.")
+
+    wifi = ask_wifi()
+    if wifi is None:
+        return
+    ssid, password = wifi
+
+    with tempfile.TemporaryDirectory() as out_dir:
+        binary = compile_sketch(sketch_dir, out_dir)
+        if binary is None:
+            return
+        with open(binary, "rb") as f:
+            data = f.read()
+        md5 = hashlib.md5(data).hexdigest()
+        asset = os.path.basename(binary)
+        url = f"https://github.com/{repo}/releases/download/{tag}/{asset}"
+        if len(url.encode()) > OTA_URL_MAX:
+            print(f"URL zu lang fuer das Register (max. {OTA_URL_MAX} Zeichen): {url}")
+            return
+        exists = capture(["gh", "release", "view", tag, "--repo", repo]) is not None
+
+        print(f"\nBereit: {asset} ({len(data)} Bytes, MD5 {md5})")
+        print(f"   Release : {repo} / {tag} ({'besteht schon, Datei wird ersetzt' if exists else 'wird neu angelegt'})")
+        print(f"   URL     : {url}")
+        print(f"   Slaves  : {slave_ids} (WLAN '{ssid.decode()}')")
+        answer = input("Release veroeffentlichen und Slaves per OTA aktualisieren? [j/N]: ")
+        if answer.strip().lower() not in ('j', 'y'):
+            print("Abgebrochen (nichts veroeffentlicht, nichts geflasht).")
+            return
+
+        if not publish_release(repo, tag, binary, exists):
+            print("Release konnte nicht veroeffentlicht werden. Slaves bleiben unveraendert.")
+            return
+
+        # Gegenprobe: liefert die URL genau die gebaute Datei? Sonst wuerde ein Slave Falsches flashen.
+        served = None
+        for attempt in range(3):
+            try:
+                served, _ = fetch_md5(url)
+                break
+            except ValueError as e:
+                print(f"   Pruefung {attempt + 1}/3: {e}")
+                time.sleep(3)
+        if served != md5:
+            print("Die veroeffentlichte Datei stimmt nicht mit der gebauten ueberein oder ist nicht erreichbar. "
+                  "Slaves bleiben unveraendert.")
+            return
+        print("Release ok, die URL liefert die gebaute Datei.")
+
+        ota_run(slave_ids, ssid, password, url, md5)
+
 # ---------- MENÜ ----------
 def slave_menu():
     while True:
@@ -479,6 +838,8 @@ def command_menu(slave_id):
         print("[s] Bus scannen (verfuegbare Slave-IDs suchen)")
         print("[n] ID des aktiven Slaves dauerhaft aendern")
         print("[k] ID per MAC-Adresse aendern (auch bei doppelten IDs)")
+        print("[o] Firmware-Update (OTA) fuer den aktiven Slave")
+        print("[u] Firmware bauen + als GitHub-Release veroeffentlichen + per OTA aufspielen (aktiver Slave)")
         print("[i] Anderen Slave waehlen")
         print("[q] Beenden")
 
@@ -505,6 +866,8 @@ def command_menu(slave_id):
             print("[2] LED AUS")
             print("[3] Neustart ESP32")
             print("[4] LoRa-Konfiguration setzen")
+            print("[5] Firmware-Update (OTA), nacheinander")
+            print("[6] Firmware bauen + GitHub-Release + OTA, nacheinander")
             sub_choice = input("Befehl waehlen: ").strip()
             if sub_choice == '1':
                 send_to_all(1, "LED AN")
@@ -512,6 +875,10 @@ def command_menu(slave_id):
                 send_to_all(2, "LED AUS")
             elif sub_choice == '3':
                 send_to_all(99, "ESP32 Neustart")
+            elif sub_choice == '5':
+                ota_update(list(SLAVE_IDS))
+            elif sub_choice == '6':
+                build_release_ota(list(SLAVE_IDS))
             elif sub_choice == '4':
                 print("Achtung: LoRa-Konfiguration wird an alle Slaves gesendet.")
                 print("Aktuelle Werte eingeben.")
@@ -549,6 +916,10 @@ def command_menu(slave_id):
             slave_id = change_slave_id(slave_id)
         elif choice == 'k':
             change_id_by_mac()
+        elif choice == 'o':
+            ota_update([slave_id])
+        elif choice == 'u':
+            build_release_ota([slave_id])
         elif choice == 'i':
             return 'change_id'
         elif choice == 'q':
@@ -561,7 +932,6 @@ if client.connect():
     print("Verbindung zum Modbus hergestellt")
 
     try:
-        scan_bus(SCAN_FIRST, SCAN_LAST)
         slave_id = slave_menu()
 
         while True:
