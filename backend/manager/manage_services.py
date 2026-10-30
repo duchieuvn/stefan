@@ -13,7 +13,6 @@ show what it is doing. Everything else here is a client of that daemon:
     python manage_services.py start pump sync # start / stop / run-now take service keys
     python manage_services.py stop pump
     python manage_services.py run-now pump    # run a scheduled job now
-    python manage_services.py ota             # update the slave firmware over WiFi (asks for it)
     python manage_services.py shutdown        # stop all services and the daemon
     python manage_services.py daemon          # run the daemon in the foreground
 
@@ -22,9 +21,8 @@ running yet. Quitting the UI leaves the daemon and its services running. Run thi
 with the Python environment the services need (e.g. the `stefan` conda env); the
 daemon and the services use that same interpreter.
 
-One-shot services (the firmware update) run once with settings given at start
-(e.g. WiFi credentials, kept only in memory while they run), are never restarted
-and are left out of start-all.
+One-shot services run once with settings given at start (kept only in memory while
+they run), are never restarted and are left out of start-all. There are none at the moment.
 
 Copies of a service started by hand (e.g. with nohup) are found by scanning running
 python processes for the script name: they are shown, can be stopped, and block
@@ -36,7 +34,6 @@ from __future__ import annotations
 import argparse
 import curses
 import fcntl
-import getpass
 import json
 import locale
 import multiprocessing
@@ -62,8 +59,6 @@ PYTHON = os.environ.get("SERVICES_PYTHON", sys.executable)
 SOCKET_PATH = BACKEND_DIR / "manage_services.sock"
 PID_PATH = BACKEND_DIR / "manage_services.pid"
 DAEMON_LOG = LOG_DIR / "manage_services.log"
-# Symlink to .env.prod or .env.test; asked for before the sensor logger's first start.
-SENSOR_ENV = BACKEND_DIR / "services/sensor_logger/.env"
 
 START_GAP_S = 2.0            # pause between starts when starting several services
 STOP_GRACE_S = 15.0          # after a stop request, wait this long before SIGTERM
@@ -97,10 +92,10 @@ class Service:
 # Listed in start order.
 SERVICES: tuple[Service, ...] = (
     Service(
-        "sensor",
-        "Sensor data logger",
-        "services/sensor_logger/main_senor_data.py",
-        "logs/main_senor_data.log",
+        "rotation",
+        "Rotation logger",
+        "services/slave_rotation/main_rotation_data.py",
+        "logs/main_rotation_data.log",
         # Don't rewrite the nodes' LoRa settings; read them from the first node
         # (defaults if that fails) instead of asking on the terminal.
         settings={"lora": "read"},
@@ -126,13 +121,6 @@ SERVICES: tuple[Service, ...] = (
         "services/water_pump/schedule_pump.py",
         "logs/schedule_pump.log",
         run_now=True,
-    ),
-    Service(
-        "ota",
-        "Firmware update",
-        "services/sensor_logger/ota_update.py",
-        "logs/ota_update.log",
-        one_shot=True,
     ),
 )
 KEYS = {svc.key: idx for idx, svc in enumerate(SERVICES)}
@@ -669,67 +657,10 @@ def detail_lines(st: dict) -> list[tuple[str, str, str]]:
     return lines
 
 
-def ask_ota_settings(ask, nodes: str | None = None, ssid: str | None = None,
-                     url: str | None = None) -> dict | None:
-    """Ask for the settings of a firmware update; None if the user cancelled.
-
-    ask(label, secret) returns the answer, or None on cancel. Answers given as
-    arguments are not asked again. Raises ValueError on an unusable answer.
-    """
-    if nodes is None:
-        nodes = ask("Nodes (comma-separated IDs, empty = all from .env)", False)
-        if nodes is None:
-            return None
-    try:
-        node_list = [int(n) for n in nodes.replace(" ", "").split(",") if n]
-    except ValueError:
-        raise ValueError(f"Not a list of node IDs: {nodes!r}") from None
-    if ssid is None:
-        ssid = ask("WiFi SSID", False)
-        if ssid is None:
-            return None
-    if not ssid:
-        raise ValueError("The nodes need a WiFi SSID to download the firmware.")
-    password = ask("WiFi password (empty = open network)", True)
-    if password is None:
-        return None
-    if url is None:
-        url = ask("Firmware URL (empty = OTA_URL from .env)", False)
-        if url is None:
-            return None
-    settings = {"ssid": ssid, "password": password}
-    if node_list:
-        settings["nodes"] = node_list
-    if url:
-        settings["url"] = url
-    return settings
-
-
-def sensor_env_missing() -> bool:
-    return not SENSOR_ENV.exists() and not SENSOR_ENV.is_symlink()
-
-
-def ask_sensor_env(ask) -> str | None:
-    """Ask whether the sensor logger uses .env.prod or .env.test and link .env to it.
-
-    ask(label) returns the answer, or None on cancel. Returns the choice, or None
-    if the user cancelled. Raises ValueError on an unusable answer.
-    """
-    answer = ask("Sensor logger has no .env yet. Config [prod/test]")
-    if answer is None:
-        return None
-    answer = answer.strip().lower()
-    if answer not in ("prod", "test"):
-        raise ValueError(f"Not a config: {answer!r} (answer prod or test)")
-    SENSOR_ENV.symlink_to(f".env.{answer}")
-    return answer
-
-
 # Asked once, before the first start of a service that needs it:
 # (services, is it missing, ask(ask_line) -> answer or None, file it writes).
 FIRST_RUN = (
-    (("sensor",), sensor_env_missing, ask_sensor_env, SENSOR_ENV),
-    (("sensor", "sync", "reduce"), db_path.missing, db_path.ask_sqlite_path, db_path.DATA_PATH_ENV),
+    (("rotation", "sync", "reduce"), db_path.missing, db_path.ask_sqlite_path, db_path.DATA_PATH_ENV),
 )
 
 
@@ -873,7 +804,7 @@ class Tui:
         if self.message:
             self.put(height - 3, 1, self.message, self.colors["warn"] | bold)
         self.put(height - 2, 1, f"↑/↓ move   space select   a select all/none   1-{len(SERVICES)} jump", dim)
-        self.put(height - 1, 1, "s start (firmware update asks for WiFi)   x stop   n run now   "
+        self.put(height - 1, 1, "s start   x stop   n run now   "
                                 "q quit (services keep running)", dim)
         self.screen.refresh()
 
@@ -925,7 +856,6 @@ class Tui:
 
     def start_selected(self) -> None:
         targets = self.targets()
-        settings = {}
         for keys, missing, ask, path in FIRST_RUN:
             if any(KEYS[key] in targets for key in keys) and missing():
                 try:
@@ -936,23 +866,12 @@ class Tui:
                 if answer is None:
                     self.message = f"Start cancelled: {path.name} is needed first."
                     return
-        if KEYS["ota"] in targets:
-            try:
-                ota = ask_ota_settings(lambda label, secret: self.prompt(label, secret))
-            except ValueError as error:
-                self.message = str(error)
-                return
-            nodes = ", ".join(map(str, ota["nodes"])) if ota and "nodes" in ota else "all nodes"
-            if ota is None or not self.confirm(f"Update the firmware of {nodes} via WiFi '{ota['ssid']}'?"):
-                self.message = "Firmware update cancelled."
-                return
-            settings["ota"] = ota
         try:
             ensure_daemon()
         except RuntimeError as error:
             self.message = str(error)
             return
-        response = self.call("start", targets, settings)
+        response = self.call("start", targets)
         self.selected.clear()
         if response is None:
             return
@@ -1160,59 +1079,6 @@ def stop_outside_manager(indices: list[int]) -> int:
     return 0
 
 
-def start_ota(nodes: str | None, ssid: str | None, url: str | None, md5_check: bool) -> int:
-    """Ask for the update settings, start the update and follow it until it ends."""
-    def ask(label: str, secret: bool) -> str | None:
-        try:
-            return getpass.getpass(f"{label}: ") if secret else input(f"{label}: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return None
-
-    try:
-        settings = ask_ota_settings(ask, nodes, ssid, url)
-    except ValueError as error:
-        print(error)
-        return 1
-    if settings is None:
-        print("Firmware update cancelled.")
-        return 1
-    if not md5_check:
-        settings["md5_check"] = False
-    ensure_daemon()
-    response = call("start", ["ota"], {"ota": settings})
-    if not response["ok"]:
-        print(response["error"])
-        return 1
-    if not response["started"]:
-        reasons = response["refused"] or ["a firmware update is already running"]
-        print(f"Not started: {'; '.join(reasons)}")
-        return 1
-    print("Firmware update started (Ctrl+C stops following; the update keeps running).")
-    shown = None
-    try:
-        while True:
-            time.sleep(1)
-            st = service_states(call("status"))[KEYS["ota"]]
-            if st is None:
-                continue
-            activity = st["info"].get("activity")
-            if activity and activity != shown and st["state"] == "running":
-                print(f"  {activity}")
-                shown = activity
-            if st["state"] == "stopped":
-                break
-    except KeyboardInterrupt:
-        print("\nStopped following. `manage_services.py stop ota` aborts the update.")
-        return 0
-    for line in str(st["info"].get("last_result", "")).split(" | "):
-        if line:
-            print(f"  node {line}")
-    print(f"Firmware update {st['last_exit']}" + (f": {st['last_error']}" if st["last_error"] else ""))
-    print(f"Log: {SERVICES[KEYS['ota']].log_path}")
-    return 0 if st["last_exit"].startswith("finished") else 1
-
-
 def run_now(keys: list[str]) -> int:
     try:
         response = call("run-now", keys)
@@ -1249,23 +1115,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run, watch and control the backend background services.")
     parser.add_argument("command", nargs="?", default="tui",
                         choices=("tui", "status", "start", "stop", "run-now", "start-all", "stop-all",
-                                 "ota", "shutdown", "daemon"),
+                                 "shutdown", "daemon"),
                         help="default: interactive terminal UI")
     parser.add_argument("services", nargs="*", metavar="service",
                         help=f"for start, stop and run-now: {', '.join(KEYS)}")
-    ota = parser.add_argument_group("firmware update (ota); what is not given is asked for")
-    ota.add_argument("--nodes", help="comma-separated node IDs (default: all from .env)")
-    ota.add_argument("--ssid", help="WiFi the nodes join for the download (the password is always asked)")
-    ota.add_argument("--url", help="firmware URL (default: OTA_URL from .env)")
-    ota.add_argument("--no-md5", action="store_true", help="don't check the download on this machine first")
     args = parser.parse_args()
     unknown = [key for key in args.services if key not in KEYS]
     if unknown:
         parser.error(f"unknown service {', '.join(unknown)} (choose from {', '.join(KEYS)})")
     if args.command in ("start", "stop", "run-now") and not args.services:
         parser.error(f"{args.command} needs at least one service: {', '.join(KEYS)}")
-    if args.command == "start" and "ota" in args.services:
-        parser.error("start a firmware update with: manage_services.py ota")
 
     try:
         if args.command == "daemon":
@@ -1275,8 +1134,6 @@ def main() -> int:
             return 0
         if args.command in ("start", "start-all"):
             return start_services(args.services or [svc.key for svc in SERVICES if not svc.one_shot])
-        if args.command == "ota":
-            return start_ota(args.nodes, args.ssid, args.url, not args.no_md5)
         if args.command in ("stop", "stop-all"):
             return stop_services(args.services or list(KEYS))
         if args.command == "run-now":
