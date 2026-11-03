@@ -529,7 +529,7 @@ class RequestHandler(socketserver.StreamRequestHandler):
         self.wfile.write(json.dumps(response).encode() + b"\n")
 
 
-def run_daemon() -> int:
+def run_daemon(start_all: bool = False) -> int:
     lock = open(PID_PATH, "a+")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -555,6 +555,9 @@ def run_daemon() -> int:
     server.manager = daemon
     server.timeout = TICK_S
     log(f"Manager daemon started (pid {os.getpid()}, python {sys.executable})")
+    # In a container nobody runs start-all. One-shot services (ota) only run on request.
+    if start_all:
+        daemon.start([index for index, svc in enumerate(SERVICES) if not svc.one_shot], {})
     try:
         while not daemon.finished:
             server.handle_request()
@@ -1017,6 +1020,9 @@ def print_status() -> None:
         text, _ = describe(st)
         activity = st["info"].get("activity") if st["state"] == "running" else None
         print(f"{idx + 1}. {svc.name:<20} {text}" + (f"   {activity}" if activity else ""))
+        # A scheduled job can fail while its service is still running, so show the last error even if the service is running.
+        if st["info"].get("last_result"):
+            print(f"   last result: {st['info']['last_result']}")
         if st["last_error"] and st["state"] != "running":
             print(f"   last error: {st['last_error']}")
 
@@ -1176,14 +1182,31 @@ def shutdown() -> int:
     return 1
 
 
+def selfcheck(services: list[Service] | tuple[Service, ...] = SERVICES) -> int:
+    """Check that every service imports, each in its own process; needs no hardware."""
+
+    failed = 0
+    for svc in services:
+        path = svc.script_path
+        result = subprocess.run([PYTHON, "-c", "import importlib, sys; importlib.import_module(sys.argv[1])", path.stem],cwd=path.parent, capture_output=True, text=True)
+        if result.returncode == 0:
+            print(f"{svc.name}: OK")
+        else:
+            print(f"{svc.name}: FAILED")
+            print(result.stderr)
+            failed = 1
+    return failed
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run, watch and control the backend background services.")
     parser.add_argument("command", nargs="?", default="tui",
                         choices=("tui", "status", "start", "stop", "run-now", "start-all", "stop-all",
-                                 "ota", "shutdown", "daemon"),
+                                 "ota", "shutdown", "daemon", "selfcheck"),
                         help="default: interactive terminal UI")
     parser.add_argument("services", nargs="*", metavar="service",
                         help=f"for start, stop and run-now: {', '.join(KEYS)}")
+    parser.add_argument("--json", action="store_true", help="for status: print the daemon's JSON; exit 1 if it is not running")
+    parser.add_argument("--start-all", action="store_true", help="for daemon: start all services right away")
     ota = parser.add_argument_group("firmware update (ota); what is not given is asked for")
     ota.add_argument("--nodes", help="comma-separated node IDs (default: all from .env)")
     ota.add_argument("--ssid", help="WiFi the nodes join for the download (the password is always asked)")
@@ -1200,7 +1223,12 @@ def main() -> int:
 
     try:
         if args.command == "daemon":
-            return run_daemon()
+            return run_daemon(args.start_all)
+        if args.command == "selfcheck":
+            return selfcheck()
+        if args.command == "status" and args.json:
+            print(json.dumps(call("status")))
+            return 0
         if args.command == "status":
             print_status()
             return 0
