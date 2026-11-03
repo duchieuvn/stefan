@@ -16,3 +16,4 @@ prototype_02/
 data/**
 build/
 logs/
+tests/
