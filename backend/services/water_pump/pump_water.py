@@ -1,3 +1,4 @@
+import os
 import sys
 import time
 from pathlib import Path
@@ -11,7 +12,7 @@ from service_runtime import ServiceContext
 # Heltec settings
 # ============================
 
-PORT = "/dev/ttyUSB1"
+PORT = os.environ.get("PUMP_PORT", "/dev/ttyUSB1")
 BAUDRATE = 115200
 
 ON_TIME = 12      # Pump ON for 13 seconds
